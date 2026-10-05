@@ -1,13 +1,12 @@
-import java.awt.Desktop;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.net.URL;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.nio.file.StandardOpenOption.APPEND;
 import static java.nio.file.StandardOpenOption.CREATE;
@@ -15,13 +14,22 @@ import static java.nio.file.StandardOpenOption.WRITE;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 public class GitHub_Informer {
+	private static final String ISSUE_COMMENT_TEMPLATE = "### AI Review Finding\n\n"
+		+ "**File:** {{file}}\n"
+		+ "**Line:** {{line}}\n"
+		+ "**Issue:** {{issue}}\n"
+		+ "**Fix:** {{fix}}\n\n"
+		+ "{{diff_block}}";
+
 	public static void main(String args[]) {
 		System.out.println("Calling Cliq...");
-		HttpURLConnection connection;
 		Integer MAX_MESSAGE_LENGTH = 4096;
 		String MESSAGE_BREAK = "\\n";
 		Integer status = 400;
@@ -30,12 +38,19 @@ public class GitHub_Informer {
 		boolean GITHUB_ERROR = true;
 		String ERROR_MESSAGE = new String("Multiple Errors Occured");
 		StringBuffer responseContent = new StringBuffer();
+		ArrayList<String> collectedErrors = new ArrayList<String>();
 		try {
 			String message;
 			String CustomMessage;
 			String ServerURL = "https://www.github.com/";
+			if(args == null || args.length == 0 || args[0] == null || args[0].isBlank())
+			{
+				ERROR_MESSAGE = "Invalid Endpoint. Input 'channel-endpoint' is missing or empty.";
+				return;
+			}
 			String CliqChannelLink = args[0];
-			if(CliqChannelLink.contains("message") && CliqChannelLink.contains("https://cliq.zoho") && CliqChannelLink.contains("/api/v2/") && CliqChannelLink.contains("?zapikey="))
+			boolean useCliqBotAuth = isCliqBotAuthEndpoint(CliqChannelLink);
+			if(isCliqWebhookEndpoint(CliqChannelLink) || useCliqBotAuth)
 			  INVALID_ENDPOINT_ERROR = false;
 			CustomMessage = (String) System.getenv("CUSTOM_MESSAGE");
 			String Actor = (String) System.getenv("GITHUB_ACTOR");
@@ -48,8 +63,9 @@ public class GitHub_Informer {
 			for(String s: EventWords)
 			  Event += s.substring(0,1).toUpperCase() + s.substring(1) + " ";
 			Event = Event.trim();
-			String Action = (String) System.getenv("ACTION");
-			if(!Action.equals("") || Action != null)
+			String ActionRaw = (String) System.getenv("ACTION");
+			String Action = ActionRaw;
+			if(Action != null && !Action.isBlank())
 			{
 			  String[] ActionWords = Action.split("_");
 			  Action = new String();
@@ -61,7 +77,7 @@ public class GitHub_Informer {
 			{
 				Action = "made";
 			}
-			String GitHubInformerURL = "https://workdrive.zohoexternal.com/external/a55ce4b1d1b64d36de31b77b6067d0a74b47b8733459390605c849bc880b05e8/download?directDownload=true";
+			String GitHubInformerURL = resolveCliqUserModeBotImageUrl();
 			message = CustomMessage;
 			if(CustomMessage != null)
 			{
@@ -75,15 +91,15 @@ public class GitHub_Informer {
 						String RuleID = (String) System.getenv("BRANCH_RULE_ID");
 						if(Action.equals("created"))
 						{
-							message = "[" + Branch_Manager + "](" + ServerURL + Branch_Manager + ") has created a new branch protection rule - [" + Rule + "](" + RepositoryURL + "/settings/branch_protection_rules/" + RuleID + ")";
+							message = "[" + Branch_Manager + "](" + ServerURL + Branch_Manager + ") created a branch protection rule: [" + Rule + "](" + RepositoryURL + "/settings/branch_protection_rules/" + RuleID + ")";
 						}
 						else if(Action.equals("deleted"))
 						{
-							message = "[" + Branch_Manager + "](" + ServerURL + Branch_Manager + ") has deleted an existing branch protection rule - " + Rule;
+							message = "[" + Branch_Manager + "](" + ServerURL + Branch_Manager + ") deleted branch protection rule: " + Rule;
 						}
 						else if(Action.equals("edited"))
 						{
-							message = "[" + Branch_Manager + "](" + ServerURL + Branch_Manager + ") has edited an existing branch protection rule - [" + Rule + "](" + RepositoryURL + "/settings/branch_protection_rules/" + RuleID + ")";
+							message = "[" + Branch_Manager + "](" + ServerURL + Branch_Manager + ") edited branch protection rule: [" + Rule + "](" + RepositoryURL + "/settings/branch_protection_rules/" + RuleID + ")";
 						}
 					}
 					else if(Event.equals("Check Run"))
@@ -93,17 +109,17 @@ public class GitHub_Informer {
 						String ChecksURL = (String) System.getenv("CHECK_RUN_URL");
 						if(Action.equals("created"))
 						{
-							message = "[" + Checker + "](" + ServerURL + Checker + ") has created a new check run - [" + CheckName + "](" + ChecksURL + ")";
+							message = "[" + Checker + "](" + ServerURL + Checker + ") created a check run: [" + CheckName + "](" + ChecksURL + ")";
 						}
 						else if(Action.equals("completed"))
 						{
-							message = "The check run [" + CheckName + "](" + ChecksURL + ") created by [" + Checker + "](" + ServerURL + Checker + ") has been completed";
+							message = "Check run [" + CheckName + "](" + ChecksURL + ") created by [" + Checker + "](" + ServerURL + Checker + ") has been completed.";
 						}
 					}
 					else if(Event.equals("Check Suite"))
 					{
 						String CheckSuiter = (String) System.getenv("GITHUB_ACTOR");
-						message = "The check suite created by [" + CheckSuiter + "](" + ServerURL + CheckSuiter + ") has been completed";
+						message = "Check suite created by [" + CheckSuiter + "](" + ServerURL + CheckSuiter + ") has been completed.";
 					}
 					else if(Event.equals("Create"))
 					{
@@ -121,7 +137,6 @@ public class GitHub_Informer {
 					}
 					else if(Event.equals("Deployment"))
 					{
-						String Deployer = (String) System.getenv("GITHUB_ACTOR");
 						String DeploymentEnv = (String) System.getenv("DEPLOYMENT_ENV");
 						String DeploymentURL = (String) System.getenv("DEPLOYMENT_URL");
 					    DeploymentURL = DeploymentURL.replace("api","www");
@@ -130,7 +145,6 @@ public class GitHub_Informer {
 					}
 					else if(Event.equals("Deployment Status"))
 					{
-						String Deployer = (String) System.getenv("GITHUB_ACTOR");
 						String DeploymentEnv = (String) System.getenv("DEPLOYMENT_ENV");
 						String DeploymentURL = (String) System.getenv("DEPLOYMENT_URL");
 					    DeploymentURL = DeploymentURL.replace("api","www");
@@ -146,80 +160,79 @@ public class GitHub_Informer {
 						String DiscussionURL = (String) System.getenv("DISCUSSION_URL");
 						if(Action.equals("created"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has created a new discussion - [" + Discussion + "](" + DiscussionURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") created a discussion: [" + Discussion + "](" + DiscussionURL + ")";
 						}
 						else if(Action.equals("deleted"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has deleted the discussion - [" + Discussion + "](" + DiscussionURL + ")"; 
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") deleted discussion: [" + Discussion + "](" + DiscussionURL + ")"; 
 						}
 						else if(Action.equals("edited"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has edited the discussion - [" + Discussion + "](" + DiscussionURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") edited discussion: [" + Discussion + "](" + DiscussionURL + ")";
 						}
 						else if(Action.equals("pinned"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has pinned the discussion - [" + Discussion + "](" + DiscussionURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") pinned discussion: [" + Discussion + "](" + DiscussionURL + ")";
 						}
 						else if(Action.equals("unpinned"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has unpinned the discussion - [" + Discussion + "](" + DiscussionURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") unpinned discussion: [" + Discussion + "](" + DiscussionURL + ")";
 						}
 						else if(Action.equals("labeled"))
 						{
 							String LabelName = (String) System.getenv("LABEL_NAME");
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has labeled the discussion [" + Discussion + "](" + DiscussionURL + ") as [" + LabelName + "](" + RepositoryURL+ "/discussions?discussions_q=label%3A" + LabelName + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") labeled discussion [" + Discussion + "](" + DiscussionURL + ") as [" + LabelName + "](" + RepositoryURL+ "/discussions?discussions_q=label%3A" + LabelName + ")";
 						}
 						else if(Action.equals("unlabeled"))
 						{
 							String LabelName = (String) System.getenv("LABEL_NAME");
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has removed the discussion [" + Discussion + "](" + DiscussionURL + ") from the label [" + LabelName + "](" + RepositoryURL+ "/discussions?discussions_q=label%3A" + LabelName + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") removed discussion [" + Discussion + "](" + DiscussionURL + ") from label [" + LabelName + "](" + RepositoryURL+ "/discussions?discussions_q=label%3A" + LabelName + ")";
 						}
 						else if(Action.equals("locked"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has locked the discussion - [" + Discussion + "](" + DiscussionURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") locked discussion: [" + Discussion + "](" + DiscussionURL + ")";
 						}
 						else if(Action.equals("unlocked"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has unlocked the discussion - [" + Discussion + "](" + DiscussionURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") unlocked discussion: [" + Discussion + "](" + DiscussionURL + ")";
 						}
 						else if(Action.equals("transferred"))
 						{
 							String NewRepository = (String) System.getenv("NEW_REPOSITORY");
 							String NewRepositoryURL = ServerURL + NewRepository;
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has transferred the discussion [" + Discussion + "](" + DiscussionURL + ") from [" + Repository + "](" + RepositoryURL + ") to [" + NewRepository + "](" + NewRepositoryURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") transferred discussion [" + Discussion + "](" + DiscussionURL + ") from [" + Repository + "](" + RepositoryURL + ") to [" + NewRepository + "](" + NewRepositoryURL + ")";
 						}
 						else if(Action.equals("answered"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has added an answer to the discussion - [" + Discussion + "](" + DiscussionURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") added an answer to discussion: [" + Discussion + "](" + DiscussionURL + ")";
 						}
 						else if(Action.equals("unanswered"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has unmarked an answer from the discussion - [" + Discussion + "](" + DiscussionURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") removed an answer from discussion: [" + Discussion + "](" + DiscussionURL + ")";
 						}
 						else if(Action.equals("category changed"))
 						{
 							String CategoryName = (String) System.getenv("CATEGORY_NAME");
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has changed and added the discussion [" + Discussion + "](" + DiscussionURL + ") under the [" + CategoryName + "](" + RepositoryURL + "/discussions/categories/" + CategoryName + ") category";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") moved discussion [" + Discussion + "](" + DiscussionURL + ") to the [" + CategoryName + "](" + RepositoryURL + "/discussions/categories/" + CategoryName + ") category";
 						}
 					}
 					else if(Event.equals("Discussion Comment"))
 					{
 						String Discusser = (String) System.getenv("GITHUB_ACTOR");
 						String DiscussionTitle = (String) System.getenv("DISCUSSION");
-						String DiscussionComment = (String) System.getenv("DISCUSSION_COMMENT");
 						String DiscussionURL = (String) System.getenv("DISCUSSION_URL");
 						String CommentURL = (String) System.getenv("COMMENT_URL");
 						if(Action.equals("created"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has added a new [comment](" + CommentURL + ") to the discussion - [" + DiscussionTitle + "](" + DiscussionURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") added a [comment](" + CommentURL + ") to discussion: [" + DiscussionTitle + "](" + DiscussionURL + ")";
 						}
 						else if(Action.equals("edited"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has edited a [comment](" + CommentURL + ") attached to the discussion - [" + DiscussionTitle + "](" + DiscussionURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") edited a [comment](" + CommentURL + ") in discussion: [" + DiscussionTitle + "](" + DiscussionURL + ")";
 						}
 						else if(Action.equals("deleted"))
 						{
-							message = "[" + Discusser + "](" + ServerURL + Discusser + ") has deleted a [comment](" + CommentURL + ") attached with the discussion - [" + DiscussionTitle + "](" + DiscussionURL + ")";
+							message = "[" + Discusser + "](" + ServerURL + Discusser + ") deleted a [comment](" + CommentURL + ") from discussion: [" + DiscussionTitle + "](" + DiscussionURL + ")";
 						}
 					}
 					else if(Event.equals("Fork"))
@@ -230,7 +243,7 @@ public class GitHub_Informer {
 						String ForkerURL = ServerURL + Forker;
 						String RepoOwnerURL = ServerURL + RepoOwner;
 						String ForkeeURL = ServerURL + Forkee;
-						message = "[" + Forker + "](" + ForkerURL + ") has forked [" + RepoOwner + "](" + RepoOwnerURL + ") 's [" + Repository + "](" + RepositoryURL + ") repository to [" + Actor + "](" + ActorURL + ") 's [" + Forkee + "](" + ForkeeURL + ") repository";
+						message = "[" + Forker + "](" + ForkerURL + ") forked [" + RepoOwner + "](" + RepoOwnerURL + ")'s [" + Repository + "](" + RepositoryURL + ") repository to [" + Actor + "](" + ActorURL + ")'s [" + Forkee + "](" + ForkeeURL + ") repository.";
 					}
 					else if(Event.equals("Gollum"))
 					{
@@ -253,21 +266,21 @@ public class GitHub_Informer {
 						}
 						if(PageArray.size() > 1)
 						{
-							message = "A few changes has been made to the [Wiki pages](" + RepositoryURL + "/wiki) of [" + Repository + "](" + RepositoryURL + ") by [" + PageHandler + "](" + ServerURL + PageHandler + ")";
-							message = message + "\\nHere is a list of the Changes\\n";
+							message = "[" + PageHandler + "](" + ServerURL + PageHandler + ") made changes to the [Wiki pages](" + RepositoryURL + "/wiki) of [" + Repository + "](" + RepositoryURL + ")";
+							message = message + "\\nHere is a list of the changes\\n";
 						}
 						for (HashMap<String,String> PageDetails : PageArray)
 						{
 						    if(PageDetails.get("title").toLowerCase().contains("_footer"))
-							message = message + "\\n:task: The [Footer](" + PageDetails.get("html_url") + ") has been " + PageDetails.get("action");
+							message = message + "\\n:task: Footer has been " + PageDetails.get("action");
 						    else if(PageDetails.get("title").toLowerCase().contains("_sidebar"))
-							message = message + "\\n:task: The [Sidebar](" + PageDetails.get("html_url") + ") has been " + PageDetails.get("action");
+							message = message + "\\n:task: Sidebar has been " + PageDetails.get("action");
 						    else
-							message = message + "\\n:task: The Page [" + PageDetails.get("title") + "](" + PageDetails.get("html_url") + ") has been " + PageDetails.get("action") ;
+							message = message + "\\n:task: Page [" + PageDetails.get("title") + "](" + PageDetails.get("html_url") + ") has been " + PageDetails.get("action") ;
 						}
 						if(PageArray.size() == 1)
 						{
-							message = message + " at [" + Repository + "](" + RepositoryURL + ") by [" + PageHandler + "](" + ServerURL + PageHandler + ")";
+							message = "[" + PageHandler + "](" + ServerURL + PageHandler + ") made changes to the [Wiki pages](" + RepositoryURL + "/wiki) of [" + Repository + "](" + RepositoryURL + ")";
 						}
 					}
 					else if(Event.equals("Issues"))
@@ -278,74 +291,74 @@ public class GitHub_Informer {
 						String IssueURL = System.getenv("ISSUE_URL");
 						if(Action.equals("opened"))
 						{
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has created a new issue - [" + IssueName + "](" + IssueURL + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") created an issue: [" + IssueName + "](" + IssueURL + ")";
 						}
 						else if(Action.equals("closed"))
 						{
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has closed the issue - [" + IssueName + "](" + IssueURL + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") closed issue: [" + IssueName + "](" + IssueURL + ")";
 						}
 						else if(Action.equals("edited"))
 						{
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has edited the issue - [" + IssueName + "](" + IssueURL + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") edited issue: [" + IssueName + "](" + IssueURL + ")";
 						}
 						else if(Action.equals("reopened"))
 						{
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has reopened the issue - [" + IssueName + "](" + IssueURL + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") reopened issue: [" + IssueName + "](" + IssueURL + ")";
 						}
 						else if(Action.equals("deleted"))
 						{
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has deleted the issue - [" + IssueName + "](" + IssueURL + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") deleted issue: [" + IssueName + "](" + IssueURL + ")";
 						}
 						else if(Action.equals("transferred"))
 						{
 							String NewRepository = (String) System.getenv("NEW_REPOSITORY");
 							String NewRepositoryURL = ServerURL + NewRepository;
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has transferred the issue [" + IssueName + "](" + IssueURL + ") from [" + Repository + "](" + RepositoryURL + ") to [" + NewRepository + "](" + NewRepositoryURL + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") transferred issue [" + IssueName + "](" + IssueURL + ") from [" + Repository + "](" + RepositoryURL + ") to [" + NewRepository + "](" + NewRepositoryURL + ")";
 						}
 						else if(Action.equals("assigned"))
 						{
 							String AssignedUser = (String) System.getenv("ASSIGNED_USER");
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has assigned the issue [" + IssueName + "](" + IssueURL + ") to [" + AssignedUser + "](" + ServerURL + AssignedUser + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") assigned issue [" + IssueName + "](" + IssueURL + ") to [" + AssignedUser + "](" + ServerURL + AssignedUser + ")";
 						}
 						else if(Action.equals("unassigned"))
 						{
 							String AssignedUser = (String) System.getenv("ASSIGNED_USER");
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has unassigned the issue [" + IssueName + "](" + IssueURL + ") from [" + AssignedUser + "](" + ServerURL + AssignedUser + ")";	
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") unassigned [" + AssignedUser + "](" + ServerURL + AssignedUser + ") from issue [" + IssueName + "](" + IssueURL + ")";	
 						}
 						else if(Action.equals("labeled"))
 						{
 							String LabelName = (String) System.getenv("ASSIGNED_LABEL");
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has labelled the issue [" + IssueName + "](" + IssueURL + ") as " + LabelName;
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") labeled issue [" + IssueName + "](" + IssueURL + ") as " + LabelName;
 						}
 						else if(Action.equals("unlabeled"))
 						{
 							String LabelName = (String) System.getenv("ASSIGNED_LABEL");
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has removed the issue [" + IssueName + "](" + IssueURL + ") from the label " + LabelName;
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") removed issue [" + IssueName + "](" + IssueURL + ") from label " + LabelName;
 						}
 						else if(Action.equals("locked"))
 						{
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has locked the issue - [" + IssueName + "](" + IssueURL + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") locked issue: [" + IssueName + "](" + IssueURL + ")";
 						}
 						else if(Action.equals("unlocked"))
 						{
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has unlocked the issue - [" + IssueName + "](" + IssueURL + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") unlocked issue: [" + IssueName + "](" + IssueURL + ")";
 						}
 						else if(Action.equals("pinned"))
 						{
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has pinned the issue - [" + IssueName + "](" + IssueURL + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") pinned issue: [" + IssueName + "](" + IssueURL + ")";
 						}
 						else if(Action.equals("unpinned"))
 						{
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has unpinned the issue - [" + IssueName + "](" + IssueURL + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") unpinned issue: [" + IssueName + "](" + IssueURL + ")";
 						}
 						else if(Action.equals("milestoned"))
 						{
 							String Milestone = (String) System.getenv("MILESTONE");
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") has set a milestone for the issue - [" + IssueName + "](" + IssueURL + ") with " + Milestone;
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") set milestone [" + Milestone + "] for issue [" + IssueName + "](" + IssueURL + ")";
 						}
 						else if(Action.equals("demilestoned"))
 						{
-							message = "[" + Issuer + "](" + ServerURL + Issuer + ") removed the milestone that was set for the issue - [" + IssueName + "](" + IssueURL + ")";
+							message = "[" + Issuer + "](" + ServerURL + Issuer + ") removed the milestone from issue [" + IssueName + "](" + IssueURL + ")";
 						}
 					}
 					else if(Event.equals("Issue Comment"))
@@ -355,35 +368,34 @@ public class GitHub_Informer {
 						String IssueName = (String) System.getenv("ISSUE_TITLE");
 						IssueName = IssueName + " #" +  (String) System.getenv("ISSUE_NUMBER");
 						String IssueURL = (String) System.getenv("ISSUE_URL");
-						String IssueComment = (String) System.getenv("ISSUE_COMMENT");
 						if(IssueType.equals("ISSUE"))
 						{
 							if(Action.equals("created"))
 							{
-								message = "[" + Issuer + "](" + ServerURL + Issuer + ") has added a new comment to the issue - [" + IssueName + "](" + IssueURL + ")";
+								message = "[" + Issuer + "](" + ServerURL + Issuer + ") added a comment to issue: [" + IssueName + "](" + IssueURL + ")";
 							}
 							else if (Action.equals("deleted")) 
 							{
-								message = "[" + Issuer + "](" + ServerURL + Issuer + ") has deleted a comment to the issue - [" + IssueName + "](" + IssueURL + ")";
+								message = "[" + Issuer + "](" + ServerURL + Issuer + ") deleted a comment from issue: [" + IssueName + "](" + IssueURL + ")";
 							}
 							else if(Action.equals("edited"))
 							{
-								message = "[" + Issuer + "](" + ServerURL + Issuer + ") has edited a comment made to the issue - [" + IssueName + "](" + IssueURL + ")";
+								message = "[" + Issuer + "](" + ServerURL + Issuer + ") edited a comment on issue: [" + IssueName + "](" + IssueURL + ")";
 							}
 						}
 						else if(IssueType.equals("PULL_REQUEST"))
 						{
 							if(Action.equals("created"))
 							{
-								message = "[" + Issuer + "](" + ServerURL + Issuer + ") has added a new comment to the pull request [" + IssueName + "](" + IssueURL + ")";
+								message = "[" + Issuer + "](" + ServerURL + Issuer + ") added a comment to pull request [" + IssueName + "](" + IssueURL + ")";
 							}
 							else if (Action.equals("deleted")) 
 							{
-								message = "[" + Issuer + "](" + ServerURL + Issuer + ") has deleted a new comment to the pull request [" + IssueName + "](" + IssueURL + ")";
+								message = "[" + Issuer + "](" + ServerURL + Issuer + ") deleted a comment from pull request [" + IssueName + "](" + IssueURL + ")";
 							}
 							else if(Action.equals("edited"))
 							{
-								message = "[" + Issuer + "](" + ServerURL + Issuer + ") has edited a comment made to the pull request- [" + IssueName + "](" + IssueURL + ")";
+								message = "[" + Issuer + "](" + ServerURL + Issuer + ") edited a comment on pull request [" + IssueName + "](" + IssueURL + ")";
 							}
 						}
 					}
@@ -394,7 +406,7 @@ public class GitHub_Informer {
 						String NewWord = new String();
 						if(Action.equals("created"))
 							NewWord = "new ";
-						message = "[" + Labeler + "](" + ServerURL + Labeler + ") has " + Action + " a " + NewWord + "label - " + LabelName;
+						message = "[" + Labeler + "](" + ServerURL + Labeler + ") " + Action + " " + NewWord + "label: " + LabelName;
 					}
 					else if(Event.equals("Milestone"))
 					{
@@ -408,17 +420,17 @@ public class GitHub_Informer {
 							Action =  "reopened";
 						else if(Action.equals("deleted"))
 							MilestoneURL = RepositoryURL + "/milestones";
-						message = "[" + Milestoner + "](" + ServerURL + Milestoner + ") has " + Action + " a " + NewWord + "milestone - [" + MilestoneName + "](" + MilestoneURL +")";
+						message = "[" + Milestoner + "](" + ServerURL + Milestoner + ") " + Action + " " + NewWord + "milestone: [" + MilestoneName + "](" + MilestoneURL +")";
 					}
 					else if(Event.equals("Page Build"))
 					{
 						String PageBuilder = (String) System.getenv("GITHUB_ACTOR");
-						message = "A new page build has been created for the repository - [" + Repository + "](" + RepositoryURL + ") by " + "[" + PageBuilder + "](" + ServerURL + PageBuilder + ")";
+						message = "[" + PageBuilder + "](" + ServerURL + PageBuilder + ") created a page build for repository [" + Repository + "](" + RepositoryURL + ")";
 					}
 					else if(Event.equals("Public"))
 					{
 						String Publicizer = (String) System.getenv("GITHUB_ACTOR");
-						message = "The [" + Repository + "](" + RepositoryURL + ") repository has been made public by [" + Publicizer + "](" + ServerURL + Publicizer + ")";
+						message = "[" + Publicizer + "](" + ServerURL + Publicizer + ") made repository [" + Repository + "](" + RepositoryURL + ") public.";
 					}
 					else if(Event.equals("Pull Request") || Event.equals("Pull Request Target"))
 					{
@@ -429,86 +441,86 @@ public class GitHub_Informer {
 
 						if(Action.equals("opened"))
 						{
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has opened a new " + Event + " [" + PullRequest + "](" + PullRequestURL + ") for the repository [" + Repository + "](" + RepositoryURL + ")";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") opened " + Event + " [" + PullRequest + "](" + PullRequestURL + ") for repository [" + Repository + "](" + RepositoryURL + ")";
 						}
 						else if(Action.equals("edited"))
 						{
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has edited the " + Event + " [" + PullRequest + "](" + PullRequestURL + ") attached with the repository [" + Repository + "](" + RepositoryURL + ")";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") edited " + Event + " [" + PullRequest + "](" + PullRequestURL + ") in repository [" + Repository + "](" + RepositoryURL + ")";
 						}
 						else if(Action.equals("reopened"))
 						{
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has reopened the " + Event + " [" + PullRequest + "](" + PullRequestURL + ") for the repository [" + Repository + "](" + RepositoryURL + ")";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") reopened " + Event + " [" + PullRequest + "](" + PullRequestURL + ") in repository [" + Repository + "](" + RepositoryURL + ")";
 						}
 						else if(Action.equals("assigned"))
 						{
 							String AssignedUser = (String) System.getenv("ASSIGNED_USER");
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has assigned the " + Event + " [" + PullRequest + "](" + PullRequestURL + ") to [" + AssignedUser + "](" + ServerURL + AssignedUser + ")";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") assigned " + Event + " [" + PullRequest + "](" + PullRequestURL + ") to [" + AssignedUser + "](" + ServerURL + AssignedUser + ")";
 						}
 						else if(Action.equals("unassigned"))
 						{
 							String AssignedUser = (String) System.getenv("ASSIGNED_USER");
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has unassigned the " + Event + " [" + PullRequest + "](" + PullRequestURL + ") from [" + AssignedUser + "](" + ServerURL + AssignedUser + ")";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") unassigned [" + AssignedUser + "](" + ServerURL + AssignedUser + ") from " + Event + " [" + PullRequest + "](" + PullRequestURL + ")";
 						}
 						else if(Action.equals("labeled"))
 						{
 							String LabelName = (String) System.getenv("ASSIGNED_LABEL");
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has labelled the " + Event + " [" + PullRequest + "](" + PullRequestURL + ") as " + LabelName;
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") labeled " + Event + " [" + PullRequest + "](" + PullRequestURL + ") as " + LabelName;
 						}
 						else if(Action.equals("unlabeled"))
 						{
 							String LabelName = (String) System.getenv("ASSIGNED_LABEL");
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has removed the " + Event + " [" + PullRequest + "](" + PullRequestURL + ") from the label " + LabelName;
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") removed " + Event + " [" + PullRequest + "](" + PullRequestURL + ") from label " + LabelName;
 						}
 						else if(Action.equals("locked"))
 						{
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has locked the " + Event + " - [" + PullRequest + "](" + PullRequestURL + ")";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") locked " + Event + ": [" + PullRequest + "](" + PullRequestURL + ")";
 						}
 						else if(Action.equals("unlocked"))
 						{
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has unlocked the " + Event + " - [" + PullRequest + "](" + PullRequestURL + ")";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") unlocked " + Event + ": [" + PullRequest + "](" + PullRequestURL + ")";
 						}
 						else if(Action.equals("converted to draft"))
 						{
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has marked the " + Event + " [" + PullRequest + "](" + PullRequestURL + ") as draft";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") marked " + Event + " [" + PullRequest + "](" + PullRequestURL + ") as draft.";
 						}
 						else if(Action.equals("ready for review"))
 						{
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has marked the " + Event + " [" + PullRequest + "](" + PullRequestURL + ") as ready for review";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") marked " + Event + " [" + PullRequest + "](" + PullRequestURL + ") as ready for review.";
 						}
 						else if(Action.equals("review requested"))
 						{
 							String AssignedUser = (String) System.getenv("ASSIGNED_USER");
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has requested a review for [" + PullRequest + "](" + PullRequestURL + ") [" + AssignedUser + "](" + ServerURL + AssignedUser + ")";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") requested a review for [" + PullRequest + "](" + PullRequestURL + ") from [" + AssignedUser + "](" + ServerURL + AssignedUser + ")";
 						}
 						else if(Action.equals("review request removed"))
 						{
 							String AssignedUser = (String) System.getenv("ASSIGNED_USER");
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has removed that review request for [" + PullRequest + "](" + PullRequestURL + ") assigned to [" + AssignedUser + "](" + ServerURL + AssignedUser + ")";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") removed the review request for [" + PullRequest + "](" + PullRequestURL + ") from [" + AssignedUser + "](" + ServerURL + AssignedUser + ")";
 						}
 						else if(Action.equals("auto merge enabled"))
 						{
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has enabled the auto merge option";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") enabled auto-merge.";
 						}
 						else if(Action.equals("auto merge disabled"))
 						{
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has disabled the auto merge option";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") disabled auto-merge.";
 						}
 						else if(Action.equals("synchronize"))
 						{
-							message = "New changes have been added to the " + Event + " - [" + PullRequest + "](" + PullRequestURL + ")";
+							message = "New changes were added to [" + Event + "] [" + PullRequest + "](" + PullRequestURL + ")";
 						}
 						else if(Action.equals("closed"))
 						{
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has closed the pull request [" + PullRequest + "](" + PullRequestURL + ")";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") closed pull request [" + PullRequest + "](" + PullRequestURL + ")";
 						}
 						else if(Action.equals("milestoned"))
 						{
 							String Milestone = (String) System.getenv("MILESTONE");
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has milestoned the pull request [" + PullRequest + "](" + PullRequestURL + ") with " + Milestone;
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") set milestone " + Milestone + " for pull request [" + PullRequest + "](" + PullRequestURL + ")";
 						}
 						else if(Action.equals("demilestoned"))
 						{
-							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") has demilestoned the pull request [" + PullRequest + "](" + PullRequestURL + ")";
+							message = "[" + PullRequestOperator + "](" + ServerURL + PullRequestOperator + ") removed the milestone from pull request [" + PullRequest + "](" + PullRequestURL + ")";
 						}
 					}
 					else if(Event.equals("Pull Request Review"))
@@ -520,15 +532,15 @@ public class GitHub_Informer {
 						String PullRequestReviewURL = (String) System.getenv("PULL_REQUEST_REVIEW_URL");
 						if(Action.equals("submitted"))
 						{
-							message = "[" + Reviewer + "](" + ServerURL + Reviewer + ") has submitted a [review](" + PullRequestReviewURL + ") for the pull request [" + PullRequest + "](" + PullRequestURL + ")";
+							message = "[" + Reviewer + "](" + ServerURL + Reviewer + ") submitted a [review](" + PullRequestReviewURL + ") for pull request [" + PullRequest + "](" + PullRequestURL + ")";
 						}
 						else if(Action.equals("dismissed"))
 						{
-							message = "[" + Reviewer + "](" + ServerURL + Reviewer + ") has dismissed a [review](" + PullRequestReviewURL + ") for the pull request [" + PullRequest + "](" + PullRequestURL + ")";
+							message = "[" + Reviewer + "](" + ServerURL + Reviewer + ") dismissed a [review](" + PullRequestReviewURL + ") for pull request [" + PullRequest + "](" + PullRequestURL + ")";
 						}
 						else if(Action.equals("edited"))
 						{
-							message = "[" + Reviewer + "](" + ServerURL + Reviewer + ") has edited the [review details](" + PullRequestReviewURL + ") for the pull request [" + PullRequest + "](" + PullRequestURL + ")";
+							message = "[" + Reviewer + "](" + ServerURL + Reviewer + ") edited the [review details](" + PullRequestReviewURL + ") for pull request [" + PullRequest + "](" + PullRequestURL + ")";
 						}
 					}
 					else if(Event.equals("Pull Request Review Comment"))
@@ -538,11 +550,11 @@ public class GitHub_Informer {
 						PullRequest = PullRequest + " " + (String) System.getenv("PULL_REQUEST_NUMBER");
 						String PullRequestURL = (String) System.getenv("PULL_REQUEST_URL");
 						if(Action.equals("created"))
-							message = "[" + Commentor + "](" + ServerURL + Commentor + ") has created a new [pull request review comment](" + PullRequestURL + ")";
+							message = "[" + Commentor + "](" + ServerURL + Commentor + ") added a review comment to the pull request [" + PullRequest + "](" + PullRequestURL + ")";
 						else if(Action.equals("edited"))
-							message = "[" + Commentor + "](" + ServerURL + Commentor + ") has edited a [pull request review comment](" + PullRequestURL + ")";
+							message = "[" + Commentor + "](" + ServerURL + Commentor + ") edited a review comment on the pull request [" + PullRequest + "](" + PullRequestURL + ")";
 						else if(Action.equals("deleted"))
-							message = "[" + Commentor + "](" + ServerURL + Commentor + ") has deleted a [pull request review comment](" + PullRequestURL + ")";
+							message = "[" + Commentor + "](" + ServerURL + Commentor + ") deleted a review comment from the pull request [" + PullRequest + "](" + PullRequestURL + ")";
 					}	
 					else if(Event.equals("Push"))
 					{
@@ -550,8 +562,7 @@ public class GitHub_Informer {
 						String Branch_Name = (String) System.getenv("GITHUB_REF_NAME");
 						String Branch_Type = (String) System.getenv("GITHUB_REF_TYPE");
 						String Commit_URL = (String) System.getenv("COMMIT_URL");
-						String Compare_URL = (String) System.getenv("COMPARE_URL");
-						message ="[" + Pusher + "](" + ServerURL + Pusher + ") has pushed a new [code](" + Commit_URL + ") in the " + Branch_Type + " [" + Branch_Name + "](" + ServerURL + Repository + "/tree/" + Branch_Name + ")";
+						message = "[" + Pusher + "](" + ServerURL + Pusher + ") pushed a new [code](" + Commit_URL + ") in the " + Branch_Type + " [" + Branch_Name + "](" + ServerURL + Repository + "/tree/" + Branch_Name + ")";
 					}
 					else if(Event.equals("Registry Package"))
 					{
@@ -562,7 +573,7 @@ public class GitHub_Informer {
 						String RegistryPackageURL = (String) System.getenv("REGISTRY_PACKAGE_URL");
 						if(Action.equals("published"))
 						{
-							message = "[" + Publisher + "](" + ServerURL + Publisher + ") has published a new " + RegistryPackageType + " registry package [" + RegistryPackageName + " " + RegistryPackageVersion + "](" + RegistryPackageURL + ")";
+							message = "[" + Publisher + "](" + ServerURL + Publisher + ") published [" + RegistryPackageType + "] registry package [" + RegistryPackageName + " " + RegistryPackageVersion + "](" + RegistryPackageURL + ")";
 						}
 					}
 					else if(Event.equals("Release"))
@@ -573,27 +584,27 @@ public class GitHub_Informer {
 						String ReleaseURL = (String) System.getenv("RELEASE_URL");
 						if(Action.equals("published"))
 						{
-							message = "[" + Releaser + "](" + ServerURL + Releaser + ") has published a new release - [" + ReleaseName + " " + ReleaseTagName + "](" + ReleaseURL + ")";
+							message = "[" + Releaser + "](" + ServerURL + Releaser + ") published release: [" + ReleaseName + " " + ReleaseTagName + "](" + ReleaseURL + ")";
 						}
 						else if(Action.equals("created"))
 						{
-							message = "[" + Releaser + "](" + ServerURL + Releaser + ") has created a new release - [" + ReleaseName + " " + ReleaseTagName + "](" + ReleaseURL + ")";
+							message = "[" + Releaser + "](" + ServerURL + Releaser + ") created release: [" + ReleaseName + " " + ReleaseTagName + "](" + ReleaseURL + ")";
 						}
 						else if(Action.equals("prereleased"))
 						{
-							message = "[" + Releaser + "](" + ServerURL + Releaser + ") has moved [" + ReleaseName + " " + ReleaseTagName + "](" + ReleaseURL + ") to the prerelease stage";
+							message = "[" + Releaser + "](" + ServerURL + Releaser + ") moved [" + ReleaseName + " " + ReleaseTagName + "](" + ReleaseURL + ") to prerelease.";
 						}
 						else if(Action.equals("released"))
 						{
-							message = "[" + Releaser + "](" + ServerURL + Releaser + ") has released [" + ReleaseName + " " + ReleaseTagName + "](" + ReleaseURL + ")";
+							message = "[" + Releaser + "](" + ServerURL + Releaser + ") released [" + ReleaseName + " " + ReleaseTagName + "](" + ReleaseURL + ")";
 						}
 						else if(Action.equals("edited"))
 						{
-							message = "[" + Releaser + "](" + ServerURL + Releaser + ") has edited and made changes to the release [" + ReleaseName + " " + ReleaseTagName + "](" + ReleaseURL + ")";
+							message = "[" + Releaser + "](" + ServerURL + Releaser + ") edited release [" + ReleaseName + " " + ReleaseTagName + "](" + ReleaseURL + ")";
 						}
 						else if(Action.equals("deleted"))
 						{
-							message = "[" + Releaser + "](" + ServerURL + Releaser + ") has deleted a release " + ReleaseName + " " + ReleaseTagName ;
+							message = "[" + Releaser + "](" + ServerURL + Releaser + ") deleted release [" + ReleaseName + " " + ReleaseTagName + "](" + ReleaseURL + ")";
 						}
 					}
 					else if(Event.equals("Repository Dispatch"))
@@ -601,7 +612,7 @@ public class GitHub_Informer {
 						String Trigger_Actor = (String) System.getenv("GITHUB_ACTOR");
 						String WorkflowID = (String) System.getenv("GITHUB_WORKFLOW");
 						String WorkflowURL = ServerURL + Repository + "/actions/runs/" + WorkflowID;
-						message = "[" + Trigger_Actor + "](" + ServerURL + Trigger_Actor + ") has triggered a new repository dispatch - [" + Action + "](" + WorkflowURL + ")";
+						message = "[" + Trigger_Actor + "](" + ServerURL + Trigger_Actor + ") triggered repository dispatch: [" + Action + "](" + WorkflowURL + ")";
 					}
 					else if(Event.equals("Schedule"))
 					{
@@ -609,21 +620,20 @@ public class GitHub_Informer {
 						String Workflow = (String) System.getenv("GITHUB_WORKFLOW");
 						String WorkflowID = (String) System.getenv("GITHUB_RUN_ID");
 						String WorkflowURL = RepositoryURL + "/actions/runs/" + WorkflowID;
-						message = "[" + Trigger_Actor + "](" + ServerURL + Trigger_Actor + ") has scheduled a workflow [" + Workflow + "](" + WorkflowURL  + ")";
+						message = "[" + Trigger_Actor + "](" + ServerURL + Trigger_Actor + ") scheduled workflow [" + Workflow + "](" + WorkflowURL  + ")";
 					}
 					else if(Event.equals("Status"))
 					{
-						String Trigger_Actor = (String) System.getenv("GITHUB_ACTOR");
 						String Workflow = (String) System.getenv("GITHUB_WORKFLOW");
 						String WorkflowID = (String) System.getenv("GITHUB_RUN_ID");
 						String Status = (String) System.getenv("STATUS");
 						String WorkflowURL = RepositoryURL + "/actions/runs/" + WorkflowID;
-						message = "The status of the [" + Workflow + "](" + WorkflowURL + ") workflow has been updated as " + Status;
+						message = "Workflow [" + Workflow + "](" + WorkflowURL + ") status is now " + Status + ".";
 					}
 					else if(Event.equals("Watch"))
 					{
 						String Watcher = (String) System.getenv("GITHUB_ACTOR");
-						message = "[" + Watcher + "](" + ServerURL + Watcher + ") has pushed the [" + Repository + "](" + RepositoryURL + ") repository under the Watch category";
+						message = "[" + Watcher + "](" + ServerURL + Watcher + ") added repository [" + Repository + "](" + RepositoryURL + ") to Watch.";
 					}
 					else if(Event.equals("Workflow Dispatch"))
 					{
@@ -631,7 +641,7 @@ public class GitHub_Informer {
 						String Workflow = (String) System.getenv("GITHUB_WORKFLOW");
 						String WorkflowID = (String) System.getenv("GITHUB_RUN_ID");
 						String WorkflowURL = RepositoryURL + "/actions/runs/" + WorkflowID;
-						message = "[" + Dispatcher + "](" + ServerURL + Dispatcher + ") has triggered the [" + Workflow + "](" + WorkflowURL  + ") workflow";
+						message = "[" + Dispatcher + "](" + ServerURL + Dispatcher + ") triggered workflow [" + Workflow + "](" + WorkflowURL  + ")";
 					}
 				}
 				else
@@ -738,57 +748,264 @@ public class GitHub_Informer {
 				  }
 				  messages.add(split_message);
 				}
+
+				String eventNameRaw = (String) System.getenv("GITHUB_EVENT_NAME");
+				String issueTypeRaw = (String) System.getenv("ISSUE_TYPE");
+				boolean isPullRequestCommentEvent = "issue_comment".equals(eventNameRaw) && "PULL_REQUEST".equals(issueTypeRaw);
+				boolean isPullRequestReviewEvent = "pull_request_review".equals(eventNameRaw);
+				boolean isPullRequestReviewCommentEvent = "pull_request_review_comment".equals(eventNameRaw);
+				boolean isPrEvent = "pull_request".equals(eventNameRaw)
+					|| "pull_request_target".equals(eventNameRaw)
+					|| isPullRequestCommentEvent
+					|| isPullRequestReviewEvent
+					|| isPullRequestReviewCommentEvent;
+				String prNumber = (String) System.getenv("PULL_REQUEST_NUMBER");
+				if((prNumber == null || prNumber.isBlank()) && isPullRequestCommentEvent)
+				{
+					prNumber = (String) System.getenv("ISSUE_NUMBER");
+				}
+				String githubToken = (String) System.getenv("GITHUB_TOKEN");
+				String projectTokenRaw = (String) System.getenv("PROJECT_TOKEN");
+				String pullRequestTitleRaw = (String) System.getenv("PULL_REQUEST_TITLE");
+				String pullRequestBodyRaw = (String) System.getenv("PULL_REQUEST_BODY");
+				String pullRequestUrlRaw = (String) System.getenv("PULL_REQUEST_URL");
+				String pullRequestDiffUrlRaw = (String) System.getenv("PULL_REQUEST_DIFF_URL");
+				String pullRequestBaseShaRaw = (String) System.getenv("PULL_REQUEST_BASE_SHA");
+				String pullRequestHeadShaRaw = (String) System.getenv("PULL_REQUEST_HEAD_SHA");
+				String prLabelsRaw = (String) System.getenv("PR_LABELS");
+				// Project thread storage is optional and opt-in. When it is not enabled,
+				// the workflow posts a normal channel message with no thread ID persistence.
+				String threadStorageMode = defaultIfBlank((String) System.getenv("CLIQ_THREAD_STORAGE_MODE"), "").trim().toLowerCase();
+				String projectOwnerRaw = defaultIfBlank((String) System.getenv("GITHUB_PROJECT_OWNER"), "");
+				String projectNumberRaw = defaultIfBlank((String) System.getenv("PROJECT_NUMBER"), defaultIfBlank((String) System.getenv("GITHUB_PROJECT_NUMBER"), ""));
+				String projectIdRaw = defaultIfBlank((String) System.getenv("GITHUB_PROJECT_ID"), "");
+				String projectThreadFieldIdRaw = defaultIfBlank((String) System.getenv("PROJECT_THREAD_FIELD_ID"), defaultIfBlank((String) System.getenv("GITHUB_PROJECT_THREAD_FIELD_ID"), ""));
+				String projectThreadFieldNameRaw = defaultIfBlank((String) System.getenv("GITHUB_PROJECT_THREAD_FIELD_NAME"), "Cliq Thread ID");
+				String storageToken = null;
+				if("project".equals(threadStorageMode))
+				{
+					storageToken = defaultIfBlank(projectTokenRaw, githubToken);
+				}
+				debug("EventNameRaw=" + eventNameRaw + ", ActionRaw=" + ActionRaw + ", isPrEvent=" + isPrEvent + ", isPullRequestCommentEvent=" + isPullRequestCommentEvent + ", isPullRequestReviewEvent=" + isPullRequestReviewEvent + ", isPullRequestReviewCommentEvent=" + isPullRequestReviewCommentEvent + ", prNumber=" + prNumber + ", hasGithubToken=" + (githubToken != null && !githubToken.isBlank()) + ", hasProjectToken=" + (projectTokenRaw != null && !projectTokenRaw.isBlank()) + ", storageMode=" + threadStorageMode + ", hasStorageToken=" + (storageToken != null && !storageToken.isBlank()));
+				String prThreadId = null;
+				if(isPrEvent && prNumber != null && !prNumber.isBlank() && storageToken != null && !storageToken.isBlank())
+				{
+				  prThreadId = fetchCliqThreadId(
+					  Repository,
+					  prNumber,
+					  storageToken,
+					  threadStorageMode,
+					  projectOwnerRaw,
+					  projectNumberRaw,
+					  projectIdRaw,
+					  projectThreadFieldIdRaw,
+					  projectThreadFieldNameRaw
+				  );
+				  debug("Fetched existing PR threadId=" + prThreadId + ", storageMode=" + threadStorageMode);
+				}
+				String createdThreadId = null;
+
 				for(String msg : messages)
 				{
 				  msg = msg.replace("\"","'");
-				  String TextParams = "{\n\"text\":\"" + msg + "\",\n\"bot\":\n{\n\"name\":\"GitHub Informer for Zoho Cliq\",\n\"image\":\"" + GitHubInformerURL + "\"}}";
-				  connection = (HttpURLConnection) new URL(CliqChannelLink).openConnection();
-				  connection.setRequestMethod("POST");
-				  connection.setRequestProperty("Content-Type","application/json");
-				  connection.setDoOutput(true);
-				  OutputStream os = connection.getOutputStream();
-				  os.write(TextParams.getBytes());
-				  os.flush();
-				  os.close();
-				  status = connection.getResponseCode();
-				  if(status > 299) {
-					  BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getErrorStream()));
-					  String line;
-					  while((line = reader.readLine()) != null) {
-						  responseContent.append(line);
-					  }
-				    reader.close();
+				  String localResponse = "";
+				  boolean postedInThread = false;
+				  if(prThreadId != null && !prThreadId.isBlank())
+				  {
+					ArrayList<String> threadMessageIdCandidates = buildReplyToCandidates(prThreadId);
+					for(String threadMessageIdCandidate : threadMessageIdCandidates)
+					{
+						HttpResult threadedResult = postJson(CliqChannelLink, buildCliqPayload(msg, GitHubInformerURL, threadMessageIdCandidate, useCliqBotAuth));
+						status = threadedResult.status;
+						localResponse = threadedResult.body;
+						debug("Cliq threaded post status=" + status + ", threadMessageIdCandidate=" + threadMessageIdCandidate + ", responsePreview=" + preview(localResponse));
+						responseContent.append(localResponse);
+						if(status <= 299)
+						{
+							postedInThread = true;
+							break;
+						}
+					}
 				  }
 				  else
 				  {
-					  BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()));
-					  String line;
-					  while((line = reader.readLine()) != null) {
-						  responseContent.append(line);
-					  }
-					  reader.close();
+					HttpResult directResult = postJson(CliqChannelLink, buildCliqPayload(msg, GitHubInformerURL, null, useCliqBotAuth));
+					status = directResult.status;
+					localResponse = directResult.body;
+					debug("Cliq post status=" + status + ", usingReplyTo=false, responsePreview=" + preview(localResponse));
+					responseContent.append(localResponse);      
 				  }
+
+				  // Fallback: if all threaded attempts fail, retry as normal channel message.
+				  if(!postedInThread && prThreadId != null && !prThreadId.isBlank())
+				  {
+					HttpResult fallbackResult = postJson(CliqChannelLink, buildCliqPayload(msg, GitHubInformerURL, null, useCliqBotAuth));
+					status = fallbackResult.status;
+					localResponse = fallbackResult.body;
+					debug("Fallback normal post status=" + status + ", responsePreview=" + preview(localResponse));
+					responseContent.append(localResponse);
+				  }
+
+				  if(isPrEvent && (prThreadId == null || prThreadId.isBlank()) && (createdThreadId == null || createdThreadId.isBlank()))
+				  {
+					String extractedId = extractCliqMessageId(localResponse);
+					if(extractedId != null && !extractedId.isBlank())
+					{
+					  createdThreadId = extractedId;
+					  debug("Extracted createdThreadId from Cliq response=" + createdThreadId);
+					}
+					else
+					{
+					  debug("Could not extract thread/message id from Cliq response on PR opened event.");
+					}
+				  }
+
 				  if(status != 204)
+				  {
 				    ERROR_MESSAGE = responseContent.toString();
+				    if(ERROR_MESSAGE != null && !ERROR_MESSAGE.isBlank())
+				    {
+				      String trimmedError = ERROR_MESSAGE.trim();
+				      if(!collectedErrors.contains(trimmedError))
+				        collectedErrors.add(trimmedError);
+				    }
+				  }
 				}
+
+				if(isPrEvent && (prThreadId == null || prThreadId.isBlank()) && createdThreadId != null && !createdThreadId.isBlank() && prNumber != null && !prNumber.isBlank() && storageToken != null && !storageToken.isBlank())
+				{
+				  if("project".equalsIgnoreCase(defaultIfBlank(threadStorageMode, "")))
+				  {
+					ThreadStorageResult storageResult = upsertCliqThreadIdWithResult(
+						  Repository,
+						  prNumber,
+						  storageToken,
+						  createdThreadId,
+						  threadStorageMode,
+						  projectOwnerRaw,
+						  projectNumberRaw,
+						  projectIdRaw,
+						  projectThreadFieldIdRaw,
+						  projectThreadFieldNameRaw
+					  );
+					boolean threadSaved = storageResult.saved;
+
+					if(!storageResult.savedInProject)
+					{
+					  String failureReason = defaultIfBlank(storageResult.projectFailureReason, "Project custom field update failed for an unknown reason.");
+					  String warningMessage = "### Cliq Thread Storage Warning\n\n"
+						 + "Couldn't store the Cliq thread ID in the configured project custom field.\n\n"
+						 + "**Reason:** " + failureReason + "\n\n"
+						 + "Verify the custom field name and project identifier in your workflow YAML, then rerun.";
+					  if(githubToken != null && !githubToken.isBlank())
+						postPullRequestComment(Repository, prNumber, githubToken, warningMessage);
+					}
+
+					if(!threadSaved)
+					{
+					  System.err.println("PR thread id was not saved in project custom field. Check project field configuration and token scope.");
+					}
+				  }
+				  else
+				  {
+					debug("Project thread storage is disabled. Normal channel mode posts without storing the Cliq thread id.");
+				  }
+				}
+				else if(isPrEvent && (prThreadId == null || prThreadId.isBlank()) && (createdThreadId == null || createdThreadId.isBlank()) && "project".equalsIgnoreCase(defaultIfBlank(threadStorageMode, "")))
+				{
+				  System.err.println("PR thread marker not saved: Cliq response did not return a message/thread id.");
+				}
+
+				if(isPrEvent)
+				{
+					String aiThreadId = prThreadId;
+					if("project".equalsIgnoreCase(defaultIfBlank(threadStorageMode, "")) && (aiThreadId == null || aiThreadId.isBlank()) && createdThreadId != null && !createdThreadId.isBlank())
+						aiThreadId = createdThreadId;
+					handleAiReviewGate(
+						Repository,
+						prNumber,
+						eventNameRaw,
+						ActionRaw,
+						prLabelsRaw,
+						pullRequestTitleRaw,
+						pullRequestBodyRaw,
+						pullRequestUrlRaw,
+						pullRequestDiffUrlRaw,
+						pullRequestBaseShaRaw,
+						pullRequestHeadShaRaw,
+						githubToken,
+						CliqChannelLink,
+						aiThreadId,
+						GitHubInformerURL
+					);
+				}
+				debug("Final message status=" + status + ", errorMessagePreview=" + preview(ERROR_MESSAGE));
 			}
+			String eventNameRaw = defaultIfBlank((String) System.getenv("GITHUB_EVENT_NAME"), "");
+			String issueTypeRaw = defaultIfBlank((String) System.getenv("ISSUE_TYPE"), "");
+			boolean isPullRequestCommentEvent = "issue_comment".equals(eventNameRaw) && "PULL_REQUEST".equals(issueTypeRaw);
+			boolean isPullRequestReviewEvent = "pull_request_review".equals(eventNameRaw);
+			boolean isPullRequestReviewCommentEvent = "pull_request_review_comment".equals(eventNameRaw);
+			boolean isPrEvent = "pull_request".equals(eventNameRaw)
+				|| "pull_request_target".equals(eventNameRaw)
+				|| isPullRequestCommentEvent
+				|| isPullRequestReviewEvent
+				|| isPullRequestReviewCommentEvent;
 			var githubOutput = (String) System.getenv("GITHUB_OUTPUT");
 			if(Objects.nonNull(githubOutput))
 			    GITHUB_ERROR = false;
-			if(status == 204)
+			if(status == 204 || status == 200 || status == 201)
 			  MESSAGE_SEND_FAILURE_ERROR = false;
 			if(INVALID_ENDPOINT_ERROR)
-			  ERROR_MESSAGE = "Invalid Endpoint. Endpoint must be of format : <Zoho Cliq Channel API Endpoint>?zapikey=<Zoho Cliq Webhook Token>";
+			{
+			  ERROR_MESSAGE = "Invalid Endpoint. Endpoint must be either <Zoho Cliq Channel API Endpoint>?zapikey=<Zoho Cliq Webhook Token> or https://cliq.zoho.com/api/v2/channelsbyname/<CHANNEL_UNIQUE_NAME>/message?bot_unique_name=<BOT_UNIQUE_NAME>&zapikey=<Zoho Cliq Webhook Token>.";
+			  if(!collectedErrors.contains(ERROR_MESSAGE))
+			    collectedErrors.add(ERROR_MESSAGE);
+			}
 			else if(GITHUB_ERROR)
+			{
 			  ERROR_MESSAGE = "Environmental Variable GITHUB_OUTPUT missing";
+			  if(!collectedErrors.contains(ERROR_MESSAGE))
+			    collectedErrors.add(ERROR_MESSAGE);
+			}
 			else if(MESSAGE_SEND_FAILURE_ERROR)
-			  ERROR_MESSAGE = ERROR_MESSAGE;
-			else if(status == 204)
+			{
+			  ERROR_MESSAGE = responseContent.toString().isBlank() ? ERROR_MESSAGE : responseContent.toString();
+			  if(ERROR_MESSAGE != null && !ERROR_MESSAGE.isBlank() && !collectedErrors.contains(ERROR_MESSAGE))
+			    collectedErrors.add(ERROR_MESSAGE);
+			}
+			else if(status == 204 || status == 200 || status == 201)
 			  ERROR_MESSAGE = "GitHub Informer executed Successfully";
+			String finalPrNumber = (String) System.getenv("PULL_REQUEST_NUMBER");
+			if((finalPrNumber == null || finalPrNumber.isBlank()) && isPullRequestCommentEvent)
+				finalPrNumber = (String) System.getenv("ISSUE_NUMBER");
+			String finalGithubToken = defaultIfBlank((String) System.getenv("GITHUB_TOKEN"), "");
+			if(isPrEvent && finalPrNumber != null && !finalPrNumber.isBlank() && !finalGithubToken.isBlank() && !"GitHub Informer executed Successfully".equalsIgnoreCase(defaultIfBlank(ERROR_MESSAGE, "")) && (MESSAGE_SEND_FAILURE_ERROR || INVALID_ENDPOINT_ERROR || GITHUB_ERROR))
+			{
+				String prErrorSummary = defaultIfBlank(ERROR_MESSAGE, "Unknown error");
+				if(collectedErrors != null && !collectedErrors.isEmpty())
+				{
+					String summaryList = String.join("\n- ", collectedErrors);
+					prErrorSummary = "- " + summaryList;
+				}
+				String issueComment = "### GitHub Informer Error\n\n"
+					+ "Workflow failed while processing this PR.\n\n"
+					+ "**Errors:**\n" + prErrorSummary + "\n\n"
+					+ "Review the workflow logs and fix the configuration or payload issue.";
+				postPullRequestComment(Repository, finalPrNumber, finalGithubToken, issueComment);
+			}
 			writeGithubOutput(status,ERROR_MESSAGE);
 		}  catch (MalformedURLException e) {
+			ERROR_MESSAGE = "Invalid Endpoint URL. Please provide channel-endpoint as either <Cliq Channel API Endpoint>?zapikey=<Cliq Webhook Token> or /channelsbyname/<CHANNEL_UNIQUE_NAME>/message?bot_unique_name=<BOT_UNIQUE_NAME>&zapikey=<Cliq Webhook Token>.";
+			emitGithubWorkflowError("Invalid endpoint URL", ERROR_MESSAGE);
 			e.printStackTrace();
 		} catch (IOException e) {
+			ERROR_MESSAGE = "I/O Error while sending message to Cliq: " + e.getMessage();
+			emitGithubWorkflowError("Cliq API error", ERROR_MESSAGE);
+			e.printStackTrace();
+		} catch (Exception e) {
+			ERROR_MESSAGE = "Runtime Error: " + e.getClass().getSimpleName() + " - " + e.getMessage();
+			emitGithubWorkflowError("Runtime error", ERROR_MESSAGE);
 			e.printStackTrace();
 		}
 		finally
@@ -796,11 +1013,21 @@ public class GitHub_Informer {
 		  try
 		  {
 		    var githubOutput = (String) System.getenv("GITHUB_OUTPUT");
+		    if(githubOutput == null || githubOutput.isBlank())
+		    {
+		      String outputError = "GITHUB_OUTPUT is missing. The workflow cannot write action results. Check the GitHub Actions runtime environment.";
+		      emitGithubWorkflowError("GitHub Actions output error", outputError);
+		      System.err.println(outputError + " Last error: " + ERROR_MESSAGE);
+		      System.exit(1);
+		    }
 		    var file = Path.of(githubOutput);
 		    if(file.getParent() != null) Files.createDirectories(file.getParent());
 		    if(MESSAGE_SEND_FAILURE_ERROR)
 		    {
-		      ERROR_MESSAGE = "Unknown Error Occured : " + ERROR_MESSAGE;
+		      if(ERROR_MESSAGE == null || ERROR_MESSAGE.isBlank() || ERROR_MESSAGE.equals("Multiple Errors Occured"))
+		      {
+		        ERROR_MESSAGE = "Unknown Error Occured : Multiple Errors Occured";
+		      }
 		    }
 		    writeGithubOutput(status,ERROR_MESSAGE);
 		  }
@@ -876,4 +1103,2307 @@ public class GitHub_Informer {
         }
         return Array;
     }
+
+	public static class HttpResult
+	{
+		public int status;
+		public String body;
+
+		public HttpResult(int status, String body)
+		{
+			this.status = status;
+			this.body = body == null ? "" : body;
+		}
+	}
+
+	public static HttpResult postJson(String endpoint, String payload) throws IOException
+	{
+		debug("POST endpoint=" + endpoint + ", payloadPreview=" + preview(payload));
+		HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
+		connection.setRequestMethod("POST");
+		connection.setRequestProperty("Content-Type", "application/json");
+		connection.setDoOutput(true);
+		try (OutputStream os = connection.getOutputStream())
+		{
+			os.write(payload.getBytes(UTF_8));
+			os.flush();
+		}
+		int status = connection.getResponseCode();
+		String body = readConnectionBody(connection, status > 299);
+		debug("POST response status=" + status + ", bodyPreview=" + preview(body));
+		if(status >= 400)
+		{
+			emitGithubWorkflowError("HTTP API error", "POST to " + endpoint + " failed with status " + status + ". Response: " + preview(body));
+		}
+		return new HttpResult(status, body);
+	}
+
+	public static boolean isCliqWebhookEndpoint(String endpoint)
+	{
+		String value = defaultIfBlank(endpoint, "");
+		return value.contains("message") && value.contains("https://cliq.zoho") && value.contains("/api/v2/") && value.contains("?zapikey=");
+	}
+
+	public static boolean isCliqBotAuthEndpoint(String endpoint)
+	{
+		String value = defaultIfBlank(endpoint, "");
+		return value.contains("https://cliq.zoho") && value.contains("/api/v2/channelsbyname/") && value.contains("/message") && value.contains("bot_unique_name=") && value.contains("zapikey=");
+	}
+
+	public static HttpResult sendHttpRequest(String method, String endpoint, String payload, Map<String, String> headers) throws IOException
+	{
+		debug(method + " endpoint=" + endpoint + ", payloadPreview=" + preview(payload));
+		String currentEndpoint = endpoint;
+		for(int redirectCount = 0; redirectCount < 5; redirectCount++)
+		{
+			HttpURLConnection connection = (HttpURLConnection) new URL(currentEndpoint).openConnection();
+			connection.setInstanceFollowRedirects(false);
+			connection.setRequestMethod(method);
+			if(headers != null)
+			{
+				for(Map.Entry<String, String> header : headers.entrySet())
+				{
+					if(header.getValue() != null && !header.getValue().isBlank())
+						connection.setRequestProperty(header.getKey(), header.getValue());
+				}
+			}
+			if(payload != null)
+			{
+				connection.setDoOutput(true);
+				try (OutputStream os = connection.getOutputStream())
+				{
+					os.write(payload.getBytes(UTF_8));
+					os.flush();
+				}
+			}
+			int status = connection.getResponseCode();
+			if(status == HttpURLConnection.HTTP_MOVED_PERM || status == HttpURLConnection.HTTP_MOVED_TEMP || status == HttpURLConnection.HTTP_SEE_OTHER || status == 307 || status == 308)
+			{
+				String location = connection.getHeaderField("Location");
+				if(location != null && !location.isBlank())
+				{
+					currentEndpoint = new URL(new URL(currentEndpoint), location).toString();
+					debug(method + " redirecting to=" + currentEndpoint);
+					continue;
+				}
+			}
+			String body = readConnectionBody(connection, status > 299);
+			debug(method + " response status=" + status + ", bodyPreview=" + preview(body));
+			if(status >= 400)
+			{
+				emitGithubWorkflowError("HTTP API error", "Request to " + endpoint + " failed with status " + status + ". Response: " + preview(body));
+			}
+			return new HttpResult(status, body);
+		}
+		debug(method + " exceeded redirect limit for endpoint=" + endpoint);
+		return new HttpResult(500, "");
+	}
+
+	public static String readConnectionBody(HttpURLConnection connection, boolean errorStream) throws IOException
+	{
+		if(errorStream && connection.getErrorStream() == null)
+			return "";
+		if(!errorStream && connection.getInputStream() == null)
+			return "";
+		StringBuilder response = new StringBuilder();
+		try (BufferedReader reader = new BufferedReader(new InputStreamReader(errorStream ? connection.getErrorStream() : connection.getInputStream())))
+		{
+			String line;
+			while((line = reader.readLine()) != null)
+			{
+				response.append(line);
+			}
+		}
+		return response.toString();
+	}
+
+	public static String defaultCliqUserModeBotName()
+	{
+		return "GitHub Informer for Zoho Cliq";
+	}
+
+	public static String defaultCliqUserModeBotImageUrl()
+	{
+		return "https://workdrive.zohoexternal.com/external/a55ce4b1d1b64d36de31b77b6067d0a74b47b8733459390605c849bc880b05e8/download?directDownload=true";
+	}
+
+	public static String resolveCliqUserModeBotName()
+	{
+		String configuredName = defaultIfBlank((String) System.getenv("CLIQ_USER_MODE_BOT_DISPLAY_NAME"), defaultIfBlank((String) System.getenv("CLIQ_USER_MODE_BOT_NAME"), "")).trim();
+		if(configuredName.isBlank())
+			return defaultCliqUserModeBotName();
+		return configuredName;
+	}
+
+	public static String resolveCliqUserModeBotImageUrl()
+	{
+		String configuredUrl = defaultIfBlank((String) System.getenv("CLIQ_USER_MODE_BOT_IMAGE_URL"), defaultIfBlank((String) System.getenv("CLIQ_USER_MODE_BOT_URL"), "")).trim();
+		if(configuredUrl.isBlank())
+			return defaultCliqUserModeBotImageUrl();
+		return configuredUrl;
+	}
+
+	public static String buildCliqPayload(String message, String imageUrl, String threadMessageId, boolean useCliqBotAuth)
+	{
+		StringBuilder payload = new StringBuilder();
+		payload.append("{\n\"card\":{\"theme\":\"modern-inline\"},");
+		payload.append("\n\"text\":\"").append(jsonEscape(message)).append("\",");
+		payload.append("\n\"sync_message\":true,");
+		if(threadMessageId != null && !threadMessageId.isBlank())
+		{
+			String normalizedThreadMessageId = normalizeCliqReplyToId(threadMessageId);
+			payload.append("\n\"thread_message_id\":\"").append(jsonEscape(normalizedThreadMessageId)).append("\",");
+			payload.append("\n\"post_in_parent\":false,");
+		}
+		if(!useCliqBotAuth)
+		{
+			String resolvedBotName = resolveCliqUserModeBotName();
+			String resolvedImageUrl = defaultIfBlank(imageUrl, resolveCliqUserModeBotImageUrl()).trim();
+			if(resolvedImageUrl.isBlank())
+				resolvedImageUrl = defaultCliqUserModeBotImageUrl();
+			payload.append("\n\"bot\":\n{\n\"name\":\"").append(jsonEscape(resolvedBotName)).append("\",\n\"image\":\"").append(jsonEscape(resolvedImageUrl)).append("\"}}\n");
+		}
+		else
+			payload.append("\n}\n");
+		return payload.toString();
+	}
+
+	public static String buildCliqCardPayload(String message, String imageUrl, String threadMessageId, boolean useCliqBotAuth)
+	{
+		StringBuilder payload = new StringBuilder();
+		payload.append("{\n\"card\":{\"theme\":\"modern-inline\"},");
+		payload.append("\n\"text\":\"").append(jsonEscape(message)).append("\",");
+		payload.append("\n\"sync_message\":true,");
+		if(threadMessageId != null && !threadMessageId.isBlank())
+		{
+			String normalizedThreadMessageId = normalizeCliqReplyToId(threadMessageId);
+			payload.append("\n\"thread_message_id\":\"").append(jsonEscape(normalizedThreadMessageId)).append("\",");
+			payload.append("\n\"post_in_parent\":false,");
+		}
+		if(!useCliqBotAuth)
+		{
+			String resolvedBotName = resolveCliqUserModeBotName();
+			String resolvedImageUrl = defaultIfBlank(imageUrl, resolveCliqUserModeBotImageUrl()).trim();
+			if(resolvedImageUrl.isBlank())
+				resolvedImageUrl = defaultCliqUserModeBotImageUrl();
+			payload.append("\n\"bot\":\n{\n\"name\":\"").append(jsonEscape(resolvedBotName)).append("\",\n\"image\":\"").append(jsonEscape(resolvedImageUrl)).append("\"}}\n");
+		}
+		else
+			payload.append("\n}\n");
+		return payload.toString();
+	}
+
+	public static String normalizeCliqReplyToId(String rawReplyToId)
+	{
+		if(rawReplyToId == null)
+			return "";
+		String trimmed = rawReplyToId.trim();
+		if(trimmed.isBlank())
+			return "";
+		try
+		{
+			String decoded = URLDecoder.decode(trimmed, UTF_8);
+			if(decoded != null && !decoded.isBlank())
+			{
+				debug("Normalized reply_to id for threaded post.");
+				return decoded;
+			}
+		}
+		catch(Exception e)
+		{
+			debug("Unable to decode reply_to id, using raw value.");
+		}
+		return trimmed;
+	}
+
+	public static ArrayList<String> buildReplyToCandidates(String rawReplyToId)
+	{
+		ArrayList<String> candidates = new ArrayList<String>();
+		if(rawReplyToId == null)
+			return candidates;
+		String trimmed = rawReplyToId.trim();
+		if(trimmed.isBlank())
+			return candidates;
+
+		addUnique(candidates, trimmed);
+
+		String decoded = trimmed;
+		try
+		{
+			decoded = URLDecoder.decode(trimmed, UTF_8);
+			addUnique(candidates, decoded);
+		}
+		catch(Exception e)
+		{
+			debug("Unable to decode reply_to id while building candidates.");
+		}
+
+		try
+		{
+			String encodedFromDecoded = URLEncoder.encode(decoded, UTF_8).replace("+", "%20");
+			addUnique(candidates, encodedFromDecoded);
+		}
+		catch(Exception e)
+		{
+			debug("Unable to URL encode decoded reply_to candidate.");
+		}
+
+		try
+		{
+			String encodedFromTrimmed = URLEncoder.encode(trimmed, UTF_8).replace("+", "%20");
+			addUnique(candidates, encodedFromTrimmed);
+		}
+		catch(Exception e)
+		{
+			debug("Unable to URL encode raw reply_to candidate.");
+		}
+
+		debug("Built reply_to candidates count=" + candidates.size());
+		return candidates;
+	}
+
+	public static void addUnique(ArrayList<String> items, String value)
+	{
+		if(value == null)
+			return;
+		String normalized = value.trim();
+		if(normalized.isBlank())
+			return;
+		if(!items.contains(normalized))
+			items.add(normalized);
+	}
+
+	public static String jsonEscape(String raw)
+	{
+		if(raw == null)
+			return "";
+		return raw.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "");
+	}
+
+	public static String extractCliqMessageId(String response)
+	{
+		if(response == null || response.isBlank())
+			return null;
+		String[] keys = new String[] {"thread_id", "threadId", "message_id", "messageId", "id"};
+		for(String key : keys)
+		{
+			Pattern p = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*\"([^\"]+)\"");
+			Matcher m = p.matcher(response);
+			if(m.find())
+				return m.group(1);
+		}
+		return null;
+	}
+
+	public static String fetchCliqThreadId(String repository, String prNumber, String githubToken, String storageMode, String projectOwner, String projectNumberRaw, String projectIdRaw, String projectThreadFieldId, String projectThreadFieldName)
+	{
+		if("project".equalsIgnoreCase(defaultIfBlank(storageMode, "")))
+		{
+			String effectiveFieldName = defaultIfBlank(projectThreadFieldName, "Cliq Thread ID").trim();
+			String resolvedProjectId = defaultIfBlank(projectIdRaw, "").trim();
+			if(resolvedProjectId.isBlank() && !defaultIfBlank(projectOwner, "").trim().isBlank() && !defaultIfBlank(projectNumberRaw, "").trim().isBlank())
+			{
+				try
+				{
+					resolvedProjectId = resolveProjectIdByOwnerAndNumber(githubToken, projectOwner, Integer.parseInt(projectNumberRaw));
+				}
+				catch(Exception e)
+				{
+					resolvedProjectId = "";
+				}
+			}
+			String providedFieldId = defaultIfBlank(projectThreadFieldId, "").trim();
+			if(!providedFieldId.isBlank() && !resolvedProjectId.isBlank())
+			{
+				String resolvedFieldId = resolveProjectFieldIdByIdentifier(githubToken, resolvedProjectId, providedFieldId, effectiveFieldName);
+				if(resolvedFieldId != null && !resolvedFieldId.isBlank())
+				{
+					String fieldNameFromId = resolveProjectFieldNameByIdentifier(githubToken, resolvedProjectId, resolvedFieldId);
+					if(fieldNameFromId != null && !fieldNameFromId.isBlank())
+						effectiveFieldName = fieldNameFromId;
+				}
+			}
+			String projectThreadId = fetchCliqThreadIdFromProjectField(repository, prNumber, githubToken, projectOwner, projectNumberRaw, projectIdRaw, effectiveFieldName);
+			if(projectThreadId != null && !projectThreadId.isBlank())
+				return projectThreadId;
+			debug("Project field storage did not return thread id. Project mode is enabled, but no stored thread id was found.");
+			return null;
+		}
+		debug("Project thread storage is disabled. Normal channel mode does not load or reuse a thread id.");
+		return null;
+	}
+
+	public static class ThreadStorageResult
+	{
+		public boolean saved;
+		public boolean savedInProject;
+		public String projectFailureReason;
+
+		public ThreadStorageResult(boolean saved, boolean savedInProject, String projectFailureReason)
+		{
+			this.saved = saved;
+			this.savedInProject = savedInProject;
+			this.projectFailureReason = defaultIfBlank(projectFailureReason, "");
+		}
+	}
+
+	public static boolean upsertCliqThreadId(String repository, String prNumber, String githubToken, String threadId, String storageMode, String projectOwner, String projectNumberRaw, String projectIdRaw, String projectThreadFieldId, String projectThreadFieldName)
+	{
+		ThreadStorageResult result = upsertCliqThreadIdWithResult(repository, prNumber, githubToken, threadId, storageMode, projectOwner, projectNumberRaw, projectIdRaw, projectThreadFieldId, projectThreadFieldName);
+		return result.saved;
+	}
+
+	public static ThreadStorageResult upsertCliqThreadIdWithResult(String repository, String prNumber, String githubToken, String threadId, String storageMode, String projectOwner, String projectNumberRaw, String projectIdRaw, String projectThreadFieldId, String projectThreadFieldName)
+	{
+		if("project".equalsIgnoreCase(defaultIfBlank(storageMode, "")))
+		{
+			StringBuilder projectFailureReason = new StringBuilder();
+			boolean savedInProject = upsertCliqThreadIdInProjectField(repository, prNumber, githubToken, threadId, projectOwner, projectNumberRaw, projectIdRaw, projectThreadFieldId, projectThreadFieldName, projectFailureReason);
+			if(savedInProject)
+				return new ThreadStorageResult(true, true, "");
+			debug("Project field write failed. Project thread storage is enabled, but no thread id could be saved.");
+			return new ThreadStorageResult(false, false, projectFailureReason.toString());
+		}
+		debug("Project thread storage is disabled; normal channel mode stores no thread id and uses no fallback.");
+		return new ThreadStorageResult(false, false, "");
+	}
+
+	public static class ProjectItemContext
+	{
+		public String itemId;
+		public String projectId;
+		public String fieldValue;
+
+		public ProjectItemContext(String itemId, String projectId, String fieldValue)
+		{
+			this.itemId = itemId;
+			this.projectId = projectId;
+			this.fieldValue = fieldValue;
+		}
+	}
+
+	public static String fetchCliqThreadIdFromProjectField(String repository, String prNumber, String githubToken, String projectOwner, String projectNumberRaw, String projectIdRaw, String projectThreadFieldName)
+	{
+		ProjectItemContext context = resolveProjectItemContext(repository, prNumber, githubToken, projectOwner, projectNumberRaw, projectIdRaw, projectThreadFieldName);
+		if(context == null)
+			return null;
+		String value = defaultIfBlank(context.fieldValue, "").trim();
+		if(value.isBlank())
+			return null;
+		debug("Found Cliq thread id in project field storage.");
+		return value;
+	}
+
+	public static boolean upsertCliqThreadIdInProjectField(String repository, String prNumber, String githubToken, String threadId, String projectOwner, String projectNumberRaw, String projectIdRaw, String projectThreadFieldId, String projectThreadFieldName)
+	{
+		return upsertCliqThreadIdInProjectField(repository, prNumber, githubToken, threadId, projectOwner, projectNumberRaw, projectIdRaw, projectThreadFieldId, projectThreadFieldName, null);
+	}
+
+	public static boolean upsertCliqThreadIdInProjectField(String repository, String prNumber, String githubToken, String threadId, String projectOwner, String projectNumberRaw, String projectIdRaw, String projectThreadFieldId, String projectThreadFieldName, StringBuilder failureReasonOut)
+	{
+		try
+		{
+			ProjectItemContext context = resolveProjectItemContext(repository, prNumber, githubToken, projectOwner, projectNumberRaw, projectIdRaw, projectThreadFieldName);
+			if(context == null || context.projectId == null || context.projectId.isBlank() || context.itemId == null || context.itemId.isBlank())
+			{
+				String reason = "Project thread storage skipped: unable to resolve project/item context.";
+				if(failureReasonOut != null)
+					failureReasonOut.append(reason);
+				System.err.println(reason);
+				return false;
+			}
+
+			String fieldId = defaultIfBlank(projectThreadFieldId, "").trim();
+			if(fieldId.isBlank())
+			{
+				fieldId = resolveProjectFieldIdByName(githubToken, context.projectId, projectThreadFieldName);
+			}
+			else if(fieldId.startsWith("PVTF_") || fieldId.startsWith("PVTSSF_") || fieldId.startsWith("PVTIF_"))
+			{
+				// This already is the GraphQL Project V2 field node id. Keep it as-is.
+			}
+			else if(fieldId.matches("\\d+"))
+			{
+				fieldId = resolveProjectFieldIdByNumericDatabaseId(githubToken, context.projectId, fieldId, projectThreadFieldName);
+				if(fieldId == null || fieldId.isBlank())
+				{
+					String reason = "Project thread storage skipped: PROJECT_THREAD_FIELD_ID='" + projectThreadFieldId + "' could not be resolved to a valid Project V2 field node id. Provide the exact field node id (for example PVTF_...) from the project field metadata.";
+					if(failureReasonOut != null)
+						failureReasonOut.append(reason);
+					System.err.println(reason);
+					emitGithubWorkflowError("Project field configuration error", reason);
+					return false;
+				}
+			}
+			else
+			{
+				String reason = "Project thread storage skipped: PROJECT_THREAD_FIELD_ID='" + projectThreadFieldId + "' is not a valid Project V2 field node id. Use the exact field node id, not the numeric database id or a display name.";
+				if(failureReasonOut != null)
+					failureReasonOut.append(reason);
+				System.err.println(reason);
+				emitGithubWorkflowError("Project field configuration error", reason);
+				return false;
+			}
+			if(fieldId == null || fieldId.isBlank())
+			{
+				String reason = "Project thread storage skipped: unable to resolve project field id.";
+				if(failureReasonOut != null)
+					failureReasonOut.append(reason);
+				System.err.println(reason);
+				emitGithubWorkflowError("Project field configuration error", reason);
+				return false;
+			}
+
+			String mutation = "mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!,$value:String!){updateProjectV2ItemFieldValue(input:{projectId:$projectId,itemId:$itemId,fieldId:$fieldId,value:{text:$value}}){projectV2Item{id}}}";
+			String payload = "{"
+				+ "\"query\":\"" + jsonEscape(mutation) + "\"," 
+				+ "\"variables\":{"
+				+ "\"projectId\":\"" + jsonEscape(context.projectId) + "\"," 
+				+ "\"itemId\":\"" + jsonEscape(context.itemId) + "\"," 
+				+ "\"fieldId\":\"" + jsonEscape(fieldId) + "\"," 
+				+ "\"value\":\"" + jsonEscape(threadId) + "\""
+				+ "}}";
+
+			HttpResult response = postGitHubGraphql(githubToken, payload);
+			if(response.status >= 200 && response.status <= 299 && !defaultIfBlank(response.body, "").contains("\"errors\""))
+			{
+				debug("Saved Cliq thread id in GitHub Project custom field.");
+				return true;
+			}
+			String reason = "Unable to write Cliq thread id to project field: status=" + response.status + ", body=" + preview(response.body);
+			if(failureReasonOut != null)
+				failureReasonOut.append(reason);
+			System.err.println(reason);
+		}
+		catch(Exception e)
+		{
+			String reason = "Unable to write Cliq thread id to project field: " + e.getMessage();
+			if(failureReasonOut != null)
+				failureReasonOut.append(reason);
+			System.err.println(reason);
+		}
+		return false;
+	}
+
+	public static void emitGithubWorkflowError(String title, String message)
+	{
+		String safeTitle = defaultIfBlank(title, "GitHub Informer");
+		String safeMessage = defaultIfBlank(message, "");
+		if(safeMessage.isBlank())
+			return;
+		System.err.println("::error title=" + safeTitle + "::**" + safeTitle + "**: " + safeMessage);
+		System.err.println("\u001b[31mERROR: " + safeMessage + "\u001b[0m");
+	}
+
+	public static ProjectItemContext resolveProjectItemContext(String repository, String prNumberRaw, String githubToken, String projectOwnerRaw, String projectNumberRaw, String projectIdRaw, String projectThreadFieldNameRaw)
+	{
+		try
+		{
+			String owner = defaultIfBlank(projectOwnerRaw, "").trim();
+			String projectNumberText = defaultIfBlank(projectNumberRaw, "").trim();
+			String configuredProjectId = defaultIfBlank(projectIdRaw, "").trim();
+			String fieldName = defaultIfBlank(projectThreadFieldNameRaw, "Cliq Thread ID").trim();
+			if(configuredProjectId.isBlank() && (owner.isBlank() || projectNumberText.isBlank()))
+			{
+				debug("Project storage is not configured: set GITHUB_PROJECT_ID or both GITHUB_PROJECT_OWNER and PROJECT_NUMBER.");
+				return null;
+			}
+
+			int prNumber;
+			int projectNumber = -1;
+			try
+			{
+				prNumber = Integer.parseInt(defaultIfBlank(prNumberRaw, "").trim());
+				if(!projectNumberText.isBlank())
+					projectNumber = Integer.parseInt(projectNumberText);
+			}
+			catch(Exception e)
+			{
+				System.err.println("Project storage parse error: invalid project or PR number.");
+				return null;
+			}
+
+			String[] repoParts = defaultIfBlank(repository, "").split("/");
+			if(repoParts.length != 2)
+				return null;
+
+			String projectId = configuredProjectId;
+			if(projectId == null || projectId.isBlank())
+			{
+				projectId = resolveProjectIdByOwnerAndNumber(githubToken, owner, projectNumber);
+			}
+			if(projectId == null || projectId.isBlank())
+			{
+				String projectLookupMessage = "**Project lookup failed**. The configured project could not be resolved. Check `GITHUB_PROJECT_OWNER`, `PROJECT_NUMBER`, or `GITHUB_PROJECT_ID`, and make sure the PR belongs to the target GitHub Project V2.";
+				System.err.println("Project thread storage skipped: unable to resolve project id.");
+				emitGithubWorkflowError("Project lookup failed", projectLookupMessage);
+				return null;
+			}
+
+			String pullRequestNodeId = resolvePullRequestNodeId(githubToken, repoParts[0], repoParts[1], prNumber);
+			if(pullRequestNodeId == null || pullRequestNodeId.isBlank())
+			{
+				String prProjectMessage = "**PR not found in project**. The pull request could not be resolved in the configured GitHub Project. Ensure the PR is added to the project and the project metadata is valid.";
+				System.err.println("Project thread storage skipped: unable to resolve pull request node id.");
+				emitGithubWorkflowError("Project lookup failed", prProjectMessage);
+				return null;
+			}
+
+			ProjectItemContext existingContext = resolveProjectItemContextFromPullRequestNode(githubToken, pullRequestNodeId, owner, projectNumber, projectId, fieldName);
+			if(existingContext != null && existingContext.itemId != null && !existingContext.itemId.isBlank())
+				return existingContext;
+
+			String addedItemId = addPullRequestToProject(githubToken, projectId, pullRequestNodeId);
+			if(addedItemId != null && !addedItemId.isBlank())
+				return new ProjectItemContext(addedItemId, projectId, "");
+
+			String projectNotAddedMessage = "**PR not added to project**. The workflow could not add the pull request to the configured GitHub Project. Verify project permissions and that the PR is part of the correct project.";
+			emitGithubWorkflowError("Project lookup failed", projectNotAddedMessage);
+
+			// One more lookup in case PR was already added concurrently.
+			ProjectItemContext contextAfterAdd = resolveProjectItemContextFromPullRequestNode(githubToken, pullRequestNodeId, owner, projectNumber, projectId, fieldName);
+			if(contextAfterAdd != null && contextAfterAdd.itemId != null && !contextAfterAdd.itemId.isBlank())
+				return contextAfterAdd;
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to resolve project item context: " + e.getMessage());
+		}
+		return null;
+	}
+
+	public static String resolveProjectIdByOwnerAndNumber(String githubToken, String owner, int projectNumber)
+	{
+		try
+		{
+			String userProjectId = resolveProjectIdFromUser(githubToken, owner, projectNumber);
+			if(userProjectId != null && !userProjectId.isBlank())
+				return userProjectId;
+
+			String orgProjectId = resolveProjectIdFromOrganization(githubToken, owner, projectNumber);
+			if(orgProjectId != null && !orgProjectId.isBlank())
+				return orgProjectId;
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to resolve project id: " + e.getMessage());
+		}
+		return "";
+	}
+
+	public static String resolveProjectFieldIdByIdentifier(String githubToken, String projectId, String fieldIdentifierRaw, String fieldNameRaw)
+	{
+		try
+		{
+			String fieldIdentifier = defaultIfBlank(fieldIdentifierRaw, "").trim();
+			if(fieldIdentifier.matches("\\d+"))
+				return resolveProjectFieldIdByNumericDatabaseId(githubToken, projectId, fieldIdentifier, fieldNameRaw);
+			if(fieldIdentifier.startsWith("PVTF_") || fieldIdentifier.startsWith("PVTSSF_") || fieldIdentifier.startsWith("PVTIF_"))
+				return fieldIdentifier;
+			String fieldName = defaultIfBlank(fieldNameRaw, "Cliq Thread ID").trim();
+			String query = "query($projectId:ID!){node(id:$projectId){... on ProjectV2{fields(first:100){nodes{... on ProjectV2FieldCommon{id name} ... on ProjectV2Field{databaseId} ... on ProjectV2SingleSelectField{databaseId} ... on ProjectV2IterationField{databaseId}}}}}}";
+			String payload = "{"
+				+ "\"query\":\"" + jsonEscape(query) + "\"," 
+				+ "\"variables\":{\"projectId\":\"" + jsonEscape(projectId) + "\"}}";
+			HttpResult response = postGitHubGraphql(githubToken, payload);
+			if(response.status < 200 || response.status > 299 || response.body == null || response.body.isBlank() || response.body.contains("\"errors\""))
+				return "";
+
+			Matcher matcher = Pattern.compile("\\\"id\\\":\\\"([^\\\"]+)\\\",\\\"name\\\":\\\"((?:\\\\.|[^\\\\\"])*)\\\"").matcher(response.body);
+			ArrayList<String> availableFields = new ArrayList<String>();
+			String fallbackByName = "";
+			while(matcher.find())
+			{
+				String id = matcher.group(1);
+				String name = jsonUnescape(defaultIfBlank(matcher.group(2), ""));
+				if(name != null && !name.isBlank())
+					availableFields.add(name + " [" + id + "]");
+				if(fieldIdentifier.equalsIgnoreCase(id))
+					return id;
+				if(fieldName.equalsIgnoreCase(defaultIfBlank(name, "").trim()) && fallbackByName.isBlank())
+					fallbackByName = id;
+
+				int windowStart = Math.max(0, matcher.start() - 160);
+				int windowEnd = Math.min(response.body.length(), matcher.end() + 220);
+				String window = response.body.substring(windowStart, windowEnd);
+				Matcher dbMatcher = Pattern.compile("\\\"databaseId\\\":(\\d+)").matcher(window);
+				if(dbMatcher.find() && fieldIdentifier.equals(defaultIfBlank(dbMatcher.group(1), "").trim()))
+					return id;
+			}
+
+			if(!fallbackByName.isBlank())
+			{
+				debug("Project field identifier not found. Falling back to name='" + fieldName + "'.");
+				return fallbackByName;
+			}
+			debug("Project field identifier not found. Requested='" + fieldIdentifier + "', available=" + availableFields.toString());
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to resolve project field id by identifier: " + e.getMessage());
+		}
+		return "";
+	}
+
+	public static String resolveProjectFieldIdByNumericDatabaseId(String githubToken, String projectId, String fieldIdentifierRaw, String fieldNameRaw)
+	{
+		try
+		{
+			String fieldIdentifier = defaultIfBlank(fieldIdentifierRaw, "").trim();
+			String query = "query($projectId:ID!){node(id:$projectId){... on ProjectV2{fields(first:100){nodes{... on ProjectV2FieldCommon{id name} ... on ProjectV2Field{databaseId} ... on ProjectV2SingleSelectField{databaseId} ... on ProjectV2IterationField{databaseId}}}}}}";
+			String payload = "{"
+				+ "\"query\":\"" + jsonEscape(query) + "\"," 
+				+ "\"variables\":{\"projectId\":\"" + jsonEscape(projectId) + "\"}}";
+			HttpResult response = postGitHubGraphql(githubToken, payload);
+			if(response.status < 200 || response.status > 299 || response.body == null || response.body.isBlank() || response.body.contains("\"errors\""))
+				return "";
+
+			Matcher matcher = Pattern.compile("\\\"id\\\":\\\"([^\\\"]+)\\\".*?\\\"name\\\":\\\"((?:\\\\.|[^\\\\\"])*)\\\".*?\\\"databaseId\\\":(\\d+)", Pattern.DOTALL).matcher(response.body);
+			while(matcher.find())
+			{
+				String id = matcher.group(1);
+				String name = jsonUnescape(defaultIfBlank(matcher.group(2), ""));
+				String databaseId = defaultIfBlank(matcher.group(3), "").trim();
+				if(fieldIdentifier.equals(databaseId))
+				{
+					debug("Resolved numeric Project field id '" + fieldIdentifier + "' to node id '" + id + "' for field name='" + defaultIfBlank(name, "") + "'.");
+					return id;
+				}
+			}
+			debug("Could not resolve numeric Project field id '" + fieldIdentifier + "' to a Project V2 field node id.");
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to resolve project field id by numeric database id: " + e.getMessage());
+		}
+		return "";
+	}
+
+	public static String resolveProjectFieldNameByIdentifier(String githubToken, String projectId, String fieldIdentifierRaw)
+	{
+		try
+		{
+			String fieldIdentifier = defaultIfBlank(fieldIdentifierRaw, "").trim();
+			if(fieldIdentifier.isBlank())
+				return "";
+			String query = "query($projectId:ID!){node(id:$projectId){... on ProjectV2{fields(first:100){nodes{... on ProjectV2FieldCommon{id name} ... on ProjectV2Field{databaseId} ... on ProjectV2SingleSelectField{databaseId} ... on ProjectV2IterationField{databaseId}}}}}}";
+			String payload = "{"
+				+ "\"query\":\"" + jsonEscape(query) + "\"," 
+				+ "\"variables\":{\"projectId\":\"" + jsonEscape(projectId) + "\"}}";
+			HttpResult response = postGitHubGraphql(githubToken, payload);
+			if(response.status < 200 || response.status > 299 || response.body == null || response.body.isBlank() || response.body.contains("\"errors\""))
+				return "";
+
+			Matcher matcher = Pattern.compile("\\\"id\\\":\\\"([^\\\"]+)\\\".*?\\\"name\\\":\\\"((?:\\\\.|[^\\\\\"])*)\\\".*?(?:\\\"databaseId\\\":(\\d+))?", Pattern.DOTALL).matcher(response.body);
+			while(matcher.find())
+			{
+				String id = matcher.group(1);
+				String name = jsonUnescape(defaultIfBlank(matcher.group(2), ""));
+				String databaseId = defaultIfBlank(matcher.group(3), "").trim();
+				if((id.equalsIgnoreCase(fieldIdentifier) || fieldIdentifier.equals(databaseId)) && !defaultIfBlank(name, "").trim().isBlank())
+					return name;
+			}
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to resolve project field name by identifier: " + e.getMessage());
+		}
+		return "";
+	}
+
+	public static String resolveProjectIdFromUser(String githubToken, String owner, int projectNumber)
+	{
+		try
+		{
+			String query = "query($owner:String!,$projectNumber:Int!){user(login:$owner){projectV2(number:$projectNumber){id}}}";
+			String payload = "{"
+				+ "\"query\":\"" + jsonEscape(query) + "\","
+				+ "\"variables\":{"
+				+ "\"owner\":\"" + jsonEscape(owner) + "\","
+				+ "\"projectNumber\":" + projectNumber
+				+ "}}";
+			HttpResult response = postGitHubGraphql(githubToken, payload);
+			if(response.status < 200 || response.status > 299 || response.body == null || response.body.isBlank())
+				return "";
+			Matcher matcher = Pattern.compile("\\\"projectV2\\\":\\{\\\"id\\\":\\\"([^\\\"]+)\\\"\\}").matcher(response.body);
+			if(matcher.find())
+				return matcher.group(1);
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to resolve user project id: " + e.getMessage());
+		}
+		return "";
+	}
+
+	public static String resolveProjectIdFromOrganization(String githubToken, String owner, int projectNumber)
+	{
+		try
+		{
+			String query = "query($owner:String!,$projectNumber:Int!){organization(login:$owner){projectV2(number:$projectNumber){id}}}";
+			String payload = "{"
+				+ "\"query\":\"" + jsonEscape(query) + "\","
+				+ "\"variables\":{"
+				+ "\"owner\":\"" + jsonEscape(owner) + "\","
+				+ "\"projectNumber\":" + projectNumber
+				+ "}}";
+			HttpResult response = postGitHubGraphql(githubToken, payload);
+			if(response.status < 200 || response.status > 299 || response.body == null || response.body.isBlank())
+				return "";
+			Matcher matcher = Pattern.compile("\\\"projectV2\\\":\\{\\\"id\\\":\\\"([^\\\"]+)\\\"\\}").matcher(response.body);
+			if(matcher.find())
+				return matcher.group(1);
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to resolve organization project id: " + e.getMessage());
+		}
+		return "";
+	}
+
+	public static String resolvePullRequestNodeId(String githubToken, String repoOwner, String repoName, int prNumber)
+	{
+		try
+		{
+			String query = "query($owner:String!,$repo:String!,$prNumber:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$prNumber){id}}}";
+			String payload = "{"
+				+ "\"query\":\"" + jsonEscape(query) + "\","
+				+ "\"variables\":{"
+				+ "\"owner\":\"" + jsonEscape(repoOwner) + "\","
+				+ "\"repo\":\"" + jsonEscape(repoName) + "\","
+				+ "\"prNumber\":" + prNumber
+				+ "}}";
+			HttpResult response = postGitHubGraphql(githubToken, payload);
+			if(response.status < 200 || response.status > 299 || response.body == null || response.body.isBlank() || response.body.contains("\"errors\""))
+				return "";
+			Matcher matcher = Pattern.compile("\\\"pullRequest\\\":\\{\\\"id\\\":\\\"([^\\\"]+)\\\"").matcher(response.body);
+			if(matcher.find())
+				return matcher.group(1);
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to resolve pull request node id: " + e.getMessage());
+		}
+		return "";
+	}
+
+	public static ProjectItemContext resolveProjectItemContextFromPullRequestNode(String githubToken, String pullRequestNodeId, String owner, int projectNumber, String configuredProjectId, String fieldName)
+	{
+		try
+		{
+			String query = "query($prId:ID!,$fieldName:String!){node(id:$prId){... on PullRequest{projectItems(first:100){nodes{id project{id number} fieldValueByName(name:$fieldName){... on ProjectV2ItemFieldTextValue{text}}}}}}}";
+			String payload = "{"
+				+ "\"query\":\"" + jsonEscape(query) + "\","
+				+ "\"variables\":{"
+				+ "\"prId\":\"" + jsonEscape(pullRequestNodeId) + "\","
+				+ "\"fieldName\":\"" + jsonEscape(fieldName) + "\""
+				+ "}}";
+			HttpResult response = postGitHubGraphql(githubToken, payload);
+			if(response.status < 200 || response.status > 299 || response.body == null || response.body.isBlank() || response.body.contains("\"errors\""))
+				return null;
+
+			Matcher nodeMatcher = Pattern.compile("\\{\\\"id\\\":\\\"([^\\\"]+)\\\",\\\"project\\\":\\{\\\"id\\\":\\\"([^\\\"]+)\\\",\\\"number\\\":(\\d+)\\},\\\"fieldValueByName\\\":(null|\\{\\\"text\\\":\\\"((?:\\\\.|[^\\\\\"])*)\\\"[^\\}]*\\})\\}", Pattern.DOTALL).matcher(response.body);
+			while(nodeMatcher.find())
+			{
+				String itemId = nodeMatcher.group(1);
+				String currentProjectId = nodeMatcher.group(2);
+				int currentProjectNumber;
+				try
+				{
+					currentProjectNumber = Integer.parseInt(nodeMatcher.group(3));
+				}
+				catch(Exception e)
+				{
+					continue;
+				}
+				if(!defaultIfBlank(configuredProjectId, "").isBlank())
+				{
+					if(!configuredProjectId.equals(currentProjectId))
+						continue;
+				}
+				else if(currentProjectNumber != projectNumber)
+					continue;
+				String value = "";
+				if(nodeMatcher.group(4) != null && !"null".equals(nodeMatcher.group(4)))
+					value = jsonUnescape(defaultIfBlank(nodeMatcher.group(5), ""));
+				return new ProjectItemContext(itemId, currentProjectId, value);
+			}
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to resolve project item context from PR node: " + e.getMessage());
+		}
+		return null;
+	}
+
+	public static String addPullRequestToProject(String githubToken, String projectId, String pullRequestNodeId)
+	{
+		try
+		{
+			String mutation = "mutation($projectId:ID!,$contentId:ID!){addProjectV2ItemById(input:{projectId:$projectId,contentId:$contentId}){item{id}}}";
+			String payload = "{"
+				+ "\"query\":\"" + jsonEscape(mutation) + "\","
+				+ "\"variables\":{"
+				+ "\"projectId\":\"" + jsonEscape(projectId) + "\","
+				+ "\"contentId\":\"" + jsonEscape(pullRequestNodeId) + "\""
+				+ "}}";
+			HttpResult response = postGitHubGraphql(githubToken, payload);
+			if(response.status < 200 || response.status > 299 || response.body == null || response.body.isBlank())
+				return "";
+			if(response.body.contains("\"errors\""))
+			{
+				debug("addProjectV2ItemById returned errors. It may already exist or token lacks project permission. bodyPreview=" + preview(response.body));
+				return "";
+			}
+			Matcher matcher = Pattern.compile("\\\"item\\\":\\{\\\"id\\\":\\\"([^\\\"]+)\\\"\\}").matcher(response.body);
+			if(matcher.find())
+				return matcher.group(1);
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to add pull request to project: " + e.getMessage());
+		}
+		return "";
+	}
+
+	public static String resolveProjectFieldIdByName(String githubToken, String projectId, String fieldNameRaw)
+	{
+		try
+		{
+			String fieldName = defaultIfBlank(fieldNameRaw, "Cliq Thread ID").trim();
+			String query = "query($projectId:ID!){node(id:$projectId){... on ProjectV2{fields(first:100){nodes{... on ProjectV2FieldCommon{id name}}}}}}";
+			String payload = "{"
+				+ "\"query\":\"" + jsonEscape(query) + "\"," 
+				+ "\"variables\":{\"projectId\":\"" + jsonEscape(projectId) + "\"}}";
+			HttpResult response = postGitHubGraphql(githubToken, payload);
+			if(response.status < 200 || response.status > 299 || response.body == null || response.body.isBlank() || response.body.contains("\"errors\""))
+				return "";
+
+			Matcher matcher = Pattern.compile("\\\"id\\\":\\\"([^\\\"]+)\\\",\\\"name\\\":\\\"((?:\\\\.|[^\\\\\"])*)\\\"").matcher(response.body);
+			ArrayList<String> availableFields = new ArrayList<String>();
+			while(matcher.find())
+			{
+				String id = matcher.group(1);
+				String name = jsonUnescape(defaultIfBlank(matcher.group(2), ""));
+				if(name != null && !name.isBlank())
+					availableFields.add(name + " [" + id + "]");
+				// ProjectV2 field ids are not always prefixed consistently across field types.
+				if(fieldName.equalsIgnoreCase(defaultIfBlank(name, "").trim()))
+					return id;
+			}
+			debug("Project field name not found. Requested='" + fieldName + "', available=" + availableFields.toString());
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to resolve project field id: " + e.getMessage());
+		}
+		return "";
+	}
+
+	public static HttpResult postGitHubGraphql(String githubToken, String payload) throws IOException
+	{
+		HashMap<String, String> headers = new HashMap<String, String>();
+		headers.put("Accept", "application/vnd.github+json");
+		headers.put("Authorization", "Bearer " + githubToken);
+		headers.put("Content-Type", "application/json");
+		return sendHttpRequest("POST", "https://api.github.com/graphql", payload, headers);
+	}
+
+	public static class AiReviewDecision
+	{
+		public boolean passed;
+		public String status;
+		public String conclusion;
+		public String summary;
+		public String details;
+		public String reason;
+		public String rawAiContent;
+		public ArrayList<String> issueComments;
+
+		public AiReviewDecision(boolean passed, String summary, String details)
+		{
+			this(passed, passed ? "PASS" : "FAIL", summary, details, passed ? "AI review passed." : "AI review failed.");
+		}
+
+		public AiReviewDecision(boolean passed, String status, String summary, String details)
+		{
+			this(passed, status, summary, details, passed ? "AI review passed." : "AI review failed.");
+		}
+
+		public AiReviewDecision(boolean passed, String status, String summary, String details, String reason)
+		{
+			this.passed = passed;
+			this.status = defaultIfBlank(status, passed ? "PASS" : "FAIL").trim().toUpperCase();
+			this.conclusion = defaultIfBlank(status, passed ? "success" : "failure").trim().toLowerCase();
+			if("PASS".equals(this.status))
+				this.conclusion = "success";
+			else if("FAIL".equals(this.status) || "PARTIAL".equals(this.status))
+				this.conclusion = "failure";
+			this.summary = summary == null ? "" : summary;
+			this.details = details == null ? "" : details;
+			this.reason = reason == null ? "" : reason;
+			this.issueComments = new ArrayList<String>();
+		}
+	}
+
+	public static class StructuredAiReviewResult
+	{
+		public String status;
+		public String summary;
+		public String reason;
+		public String details;
+		public ArrayList<String> issues;
+	}
+
+	public static void handleAiReviewGate(String repository, String prNumber, String eventNameRaw, String actionRaw, String prLabelsRaw, String pullRequestTitle, String pullRequestBody, String pullRequestUrl, String pullRequestDiffUrl, String pullRequestBaseSha, String pullRequestHeadSha, String githubToken, String cliqEndpoint, String cliqThreadId, String imageUrl)
+	{
+		if(!isTrue(System.getenv("AI_REVIEW_ENABLED")))
+			return;
+		if(prNumber == null || prNumber.isBlank())
+			return;
+
+		String triggerMode = defaultIfBlank(System.getenv("AI_REVIEW_TRIGGER"), "auto").trim().toLowerCase();
+		boolean runOnSync = isTrue(defaultIfBlank(System.getenv("AI_REVIEW_ON_SYNC"), "true"));
+		String triggerLabel = defaultIfBlank(System.getenv("AI_REVIEW_LABEL"), "");
+
+		if(!shouldRunAiReviewForEvent(triggerMode, triggerLabel, runOnSync, eventNameRaw, actionRaw, prLabelsRaw))
+			return;
+
+		String checkName = defaultIfBlank(System.getenv("AI_REVIEW_CHECK_NAME"), "AI Review Gate");
+		AiReviewDecision decision = evaluateAiReviewDecision(repository, prNumber, pullRequestTitle, pullRequestBody, pullRequestUrl, pullRequestDiffUrl, pullRequestBaseSha, pullRequestHeadSha, githubToken);
+		String projectToken = defaultIfBlank((String) System.getenv("PROJECT_TOKEN"), "");
+		String checkToken = defaultIfBlank(githubToken, projectToken);
+
+		if(checkToken != null && !checkToken.isBlank() && pullRequestHeadSha != null && !pullRequestHeadSha.isBlank())
+		{
+			setAiReviewCheckRun(repository, pullRequestHeadSha, checkToken, checkName, decision.conclusion, decision.summary, decision.details);
+			setAiReviewCommitStatus(repository, pullRequestHeadSha, checkToken, checkName, decision.conclusion, decision.summary);
+		}
+		else
+		{
+			System.err.println("AI review check run skipped: missing check token or PR head sha.");
+		}
+
+		if(!decision.passed)
+		{
+			String prCommentToken = defaultIfBlank(githubToken, projectToken);
+			ArrayList<String> issueComments = decision.issueComments == null ? new ArrayList<String>() : decision.issueComments;
+			debug("AI review extracted issues count=" + issueComments.size());
+			int postedIssueComments = 0;
+			boolean hasIssueCommentPayload = issueComments != null && !issueComments.isEmpty();
+			if(hasIssueCommentPayload)
+			{
+				for(String issueComment : issueComments)
+				{
+					if(prCommentToken != null && !prCommentToken.isBlank())
+					{
+						if(postPullRequestComment(repository, prNumber, prCommentToken, issueComment))
+							postedIssueComments++;
+					}
+				}
+				debug("AI review posted issue comments count=" + postedIssueComments + "/" + issueComments.size());
+			}
+			String failureMessage = buildAiFailureMessage(prNumber, pullRequestUrl, decision.summary, decision.details);
+			if(!hasIssueCommentPayload)
+			{
+				ArrayList<String> rawIssueComments = new ArrayList<String>();
+				if(decision.rawAiContent != null && !decision.rawAiContent.isBlank())
+				{
+					rawIssueComments = extractIssueCommentsFromAiContent(decision.rawAiContent, decision.rawAiContent, "");
+				}
+				if(rawIssueComments != null && !rawIssueComments.isEmpty())
+				{
+					for(String issueComment : rawIssueComments)
+					{
+						if(prCommentToken != null && !prCommentToken.isBlank() && postPullRequestComment(repository, prNumber, prCommentToken, issueComment))
+							postedIssueComments++;
+					}
+					debug("AI review raw-issue fallback posted count=" + postedIssueComments);
+				}
+				if(postedIssueComments == 0 && prCommentToken != null && !prCommentToken.isBlank())
+				{
+					postPullRequestComment(repository, prNumber, prCommentToken, failureMessage);
+				}
+				else if(postedIssueComments == 0)
+				{
+					System.err.println("AI review failure PR comment skipped: missing github token.");
+				}
+			}
+			else if(postedIssueComments == 0)
+			{
+				// Preserve the itemized issue-comment model. Only fall back to a single
+				// summary PR comment when the AI produced individual issues but none of
+				// those comments could be posted successfully.
+				if(prCommentToken != null && !prCommentToken.isBlank())
+				{
+					ArrayList<String> rawIssueComments = new ArrayList<String>();
+					if(decision.rawAiContent != null && !decision.rawAiContent.isBlank())
+						rawIssueComments = extractIssueCommentsFromAiContent(decision.rawAiContent, decision.rawAiContent, "");
+					if(rawIssueComments != null && !rawIssueComments.isEmpty())
+					{
+						for(String issueComment : rawIssueComments)
+						{
+							if(postPullRequestComment(repository, prNumber, prCommentToken, issueComment))
+								postedIssueComments++;
+						}
+						debug("AI review raw-issue retry posted count=" + postedIssueComments);
+					}
+					if(postedIssueComments == 0)
+						postPullRequestComment(repository, prNumber, prCommentToken, failureMessage);
+				}
+			}
+			String projectName = defaultIfBlank((String) System.getenv("GITHUB_REPOSITORY"), "Unknown project");
+			String cliqFailureMessage = buildCliqAiFailureMessage(projectName, pullRequestUrl, decision.summary, decision.details, issueComments.size(), countUniqueFilesInIssueComments(issueComments));
+			postAiFailureToCliqThread(cliqEndpoint, cliqThreadId, imageUrl, cliqFailureMessage);
+		}
+		else
+		{
+			String projectName = defaultIfBlank((String) System.getenv("GITHUB_REPOSITORY"), "Unknown project");
+			String cliqSuccessMessage = buildCliqAiSuccessMessage(projectName, pullRequestUrl, decision.summary, decision.details, 0, 0);
+			postAiSuccessToCliqThread(cliqEndpoint, cliqThreadId, imageUrl, cliqSuccessMessage);
+		}
+	}
+
+	public static boolean shouldRunAiReviewForEvent(String triggerMode, String triggerLabel, boolean runOnSync, String eventNameRaw, String actionRaw, String prLabelsRaw)
+	{
+		if(!"pull_request".equals(eventNameRaw) && !"pull_request_target".equals(eventNameRaw))
+			return false;
+
+		if("auto".equals(triggerMode))
+		{
+			if("opened".equals(actionRaw) || "reopened".equals(actionRaw))
+				return true;
+			if("synchronize".equals(actionRaw))
+				return runOnSync;
+			return false;
+		}
+
+		if("label".equals(triggerMode))
+		{
+			if(triggerLabel == null || triggerLabel.isBlank())
+				return false;
+			if(!("opened".equals(actionRaw) || "reopened".equals(actionRaw) || "synchronize".equals(actionRaw) || "labeled".equals(actionRaw)))
+				return false;
+			if("synchronize".equals(actionRaw) && !runOnSync)
+				return false;
+			return hasLabel(prLabelsRaw, triggerLabel);
+		}
+
+		return false;
+	}
+
+	public static boolean hasLabel(String labelsRaw, String expectedLabel)
+	{
+		if(labelsRaw == null || labelsRaw.isBlank() || expectedLabel == null || expectedLabel.isBlank())
+			return false;
+		for(String label : labelsRaw.split("\\|\\||,|\\n"))
+		{
+			if(expectedLabel.trim().equalsIgnoreCase(label.trim()))
+				return true;
+		}
+		return false;
+	}
+
+	public static AiReviewDecision evaluateAiReviewDecision(String repository, String prNumber, String pullRequestTitle, String pullRequestBody, String pullRequestUrl, String pullRequestDiffUrl, String pullRequestBaseSha, String pullRequestHeadSha, String githubToken)
+	{
+		String aiToken = (String) System.getenv("AI_REVIEW_TOKEN");
+		String modelFromEnv = defaultIfBlank(System.getenv("AI_REVIEW_MODEL"), "");
+		String apiUrlFromEnv = defaultIfBlank(System.getenv("AI_REVIEW_API_URL"), "");
+
+		if(aiToken == null || aiToken.isBlank())
+		{
+			emitGithubWorkflowError("AI review configuration error", "AI review token is missing. Add the `AI_REVIEW_TOKEN` secret to the workflow environment.");
+			return new AiReviewDecision(false, "AI Review Gate failed", "AI review token is missing.");
+		}
+		if(githubToken == null || githubToken.isBlank())
+		{
+			emitGithubWorkflowError("GitHub token error", "GITHUB_TOKEN is missing. The action cannot call GitHub APIs or post review results.");
+			return new AiReviewDecision(false, "AI Review Gate failed", "GITHUB_TOKEN is missing.");
+		}
+
+		String diff = fetchPullRequestDiffWithRetries(repository, prNumber, pullRequestDiffUrl, pullRequestBaseSha, pullRequestHeadSha, githubToken);
+		if(diff == null || diff.isBlank())
+			return new AiReviewDecision(true, "PASS", "AI Review Gate passed", "GitHub returned a successful response but no diff content; treating this as no code change and passing the review gate.", "No PR diff was returned, so there was nothing to review.");
+
+		String userPrompt = buildAiPrompt(repository, prNumber, pullRequestTitle, pullRequestBody, pullRequestUrl, diff);
+		String provider = detectAiProvider(aiToken, apiUrlFromEnv);
+		String model = resolveModelForProvider(provider, modelFromEnv);
+		String apiUrl = resolveApiUrlForProvider(provider, apiUrlFromEnv);
+		String systemPrompt = "You are a strict PR reviewer and GitHub Action security/performance auditor. Return JSON only in a single object with the exact schema below. Never return markdown, never wrap in code fences, never add extra text before or after the JSON. Use this schema exactly: {\"status\": \"PASS|FAIL|PARTIAL\", \"summary\": \"short summary\", \"reason\": \"why this status was chosen\", \"issues\": [{\"file\": \"path/to/file\", \"line\": \"n/a or number\", \"issue\": \"short issue description\", \"diff_line\": \"exact risky added/changed code line from diff (optional)\", \"fix\": \"recommended fix\"}]}. Review the diff as both a production code reviewer and a secure workflow reviewer. Flag real logic, security, reliability, logging, and performance problems. Ignore formatting-only or metadata-only changes when no code behavior changed. If there is no real code-risk change, return PASS with a short summary. If the PR description is weak or blank, ignore it and judge the actual diff. Do not invent issues for harmless version bumps. Never treat insecure code as PASS just because it is labeled intentional, test-only, or demonstration content; if vulnerabilities are present in the diff, return FAIL with issues. Flag cases where the code may leak secrets, tokens, credentials, API keys, bearer values, or sensitive runtime data in logs, workflow output, debug output, raw responses, or error messages. Flag expensive or repeated API calls, excessive retries, large payload logging, noisy debug spam, or unnecessary processing that hurts GitHub Action performance. Only block the merge for genuine risk. If you cannot determine a line number, use \"n/a\". If there are no issues, set \"issues\": [].";
+
+		try
+		{
+			HttpResult aiResponse = invokeAiProvider(provider, apiUrl, aiToken, model, systemPrompt, userPrompt);
+			System.out.println("[AI_REVIEW_RAW_RESPONSE] " + defaultIfBlank(aiResponse.body, "<empty>"));
+			if(aiResponse.status < 200 || aiResponse.status > 299)
+				return new AiReviewDecision(false, "FAIL", "AI review failed", provider + " request failed with status " + aiResponse.status + ".", "The AI provider did not return a valid response.");
+
+			String content = normalizeEscapedMarkdownText(extractAiContent(aiResponse.body, provider));
+			if(content == null || content.isBlank())
+				return new AiReviewDecision(false, "FAIL", "AI review failed", provider + " returned empty content.", "The AI provider returned an empty response; the merge is blocked.");
+			String relaxedContent = content.replace("\\\"", "\"");
+			AiReviewDecision decision = null;
+
+			StructuredAiReviewResult structured = parseStructuredAiReview(content, aiResponse.body, diff);
+			if(structured != null && structured.status != null && !structured.status.isBlank())
+			{
+				String status = structured.status.trim().toUpperCase();
+				boolean passed = "PASS".equals(status);
+				String summary = defaultIfBlank(structured.summary, passed ? "AI review passed" : "AI Review Report");
+				String details = defaultIfBlank(structured.details, formatAiReviewDetails(content));
+				if(details == null || details.isBlank())
+					details = "1. No detailed issues were returned by the AI response.";
+				String reason = defaultIfBlank(structured.reason, passed ? "AI review passed." : "AI Review did not pass the gate.");
+				decision = new AiReviewDecision(passed, status, summary, details, reason);
+				decision.rawAiContent = content;
+				decision.issueComments = structured.issues == null ? new ArrayList<String>() : structured.issues;
+				if("PARTIAL".equals(status))
+					return decision;
+				if(!passed)
+					return decision;
+				return decision;
+			}
+
+			String statusFallback = extractJsonStringField(content, "status");
+			if(statusFallback == null || statusFallback.isBlank())
+				statusFallback = extractJsonStringField(content, "result");
+			if(statusFallback == null || statusFallback.isBlank())
+				statusFallback = extractJsonStringField(content, "verdict");
+			if(statusFallback == null || statusFallback.isBlank())
+				statusFallback = extractJsonStringField(relaxedContent, "status");
+			if(statusFallback == null || statusFallback.isBlank())
+				statusFallback = extractJsonStringField(relaxedContent, "result");
+			if(statusFallback == null || statusFallback.isBlank())
+				statusFallback = extractJsonStringField(relaxedContent, "verdict");
+			boolean hasEmptyIssues = Pattern.compile("(?is)\"issues\"\\s*:\\s*\\[\\s*\\]").matcher(content).find()
+				|| Pattern.compile("(?is)\"issues\"\\s*:\\s*\\[\\s*\\]").matcher(relaxedContent).find();
+			if(statusFallback != null && "PASS".equalsIgnoreCase(statusFallback.trim()) && hasEmptyIssues)
+			{
+				String summaryFallback = defaultIfBlank(extractJsonStringField(content, "summary"), extractJsonStringField(relaxedContent, "summary"));
+				summaryFallback = defaultIfBlank(summaryFallback, "AI review passed");
+				String reasonFallback = defaultIfBlank(extractJsonStringField(content, "reason"), extractJsonStringField(relaxedContent, "reason"));
+				reasonFallback = defaultIfBlank(reasonFallback, "AI review passed with no reported issues.");
+				decision = new AiReviewDecision(true, "PASS", summaryFallback, "No blocking issues were returned by the AI response.", reasonFallback);
+				decision.rawAiContent = content;
+				return decision;
+			}
+
+			decision = new AiReviewDecision(false, "FAIL", "AI Review Gate failed", "AI response did not include a valid status. Response preview: " + trimTo(defaultIfBlank(content, aiResponse.body), 800), "The AI result was empty, malformed, or missing the required status field.");
+			decision.rawAiContent = content;
+			return decision;
+		}
+		catch(Exception e)
+		{
+			return new AiReviewDecision(false, "AI Review Gate failed", provider + " error: " + e.getMessage());
+		}
+	}
+
+	public static HttpResult invokeAiProvider(String provider, String apiUrl, String token, String model, String systemPrompt, String userPrompt) throws IOException
+	{
+		if("claude".equals(provider))
+			return invokeClaude(apiUrl, token, model, systemPrompt, userPrompt);
+		if("gemini".equals(provider))
+			return invokeGemini(apiUrl, token, model, systemPrompt, userPrompt);
+		return invokeOpenAiCompatible(apiUrl, token, model, systemPrompt, userPrompt);
+	}
+
+	public static HttpResult invokeOpenAiCompatible(String apiUrl, String token, String model, String systemPrompt, String userPrompt) throws IOException
+	{
+		String payload = "{\"model\":\"" + jsonEscape(model) + "\",\"max_tokens\":6000,\"temperature\":0.1,\"messages\":[{\"role\":\"system\",\"content\":\"" + jsonEscape(systemPrompt) + "\"},{\"role\":\"user\",\"content\":\"" + jsonEscape(userPrompt) + "\"}]}";
+		HashMap<String, String> headers = new HashMap<String, String>();
+		headers.put("Content-Type", "application/json");
+		headers.put("Authorization", "Bearer " + token);
+		return sendHttpRequest("POST", apiUrl, payload, headers);
+	}
+
+	public static HttpResult invokeClaude(String apiUrl, String token, String model, String systemPrompt, String userPrompt) throws IOException
+	{
+		StringBuilder payloadBuilder = new StringBuilder();
+		payloadBuilder.append("{\"model\":\"").append(jsonEscape(model)).append("\",")
+			.append("\"max_tokens\":6000");
+		if(anthropicSupportsTemperature(model))
+			payloadBuilder.append(",\"temperature\":0.1");
+		payloadBuilder.append(",\"system\":\"").append(jsonEscape(systemPrompt)).append("\",\"messages\":[{\"role\":\"user\",\"content\":\"").append(jsonEscape(userPrompt)).append("\"}]}" );
+		String payload = payloadBuilder.toString();
+		HashMap<String, String> headers = new HashMap<String, String>();
+		headers.put("Content-Type", "application/json");
+		headers.put("x-api-key", token);
+		headers.put("anthropic-version", "2023-06-01");
+		return sendHttpRequest("POST", apiUrl, payload, headers);
+	}
+
+	public static HttpResult invokeGemini(String apiUrl, String token, String model, String systemPrompt, String userPrompt) throws IOException
+	{
+		String endpoint = apiUrl;
+		if(!endpoint.contains("generateContent"))
+		{
+			if(endpoint.endsWith("/"))
+				endpoint = endpoint.substring(0, endpoint.length() - 1);
+			endpoint = endpoint + "/" + urlEncodePathSegment(model) + ":generateContent";
+		}
+		if(endpoint.contains("?"))
+			endpoint = endpoint + "&key=" + URLEncoder.encode(token, UTF_8);
+		else
+			endpoint = endpoint + "?key=" + URLEncoder.encode(token, UTF_8);
+
+		String payload = "{\"system_instruction\":{\"parts\":[{\"text\":\"" + jsonEscape(systemPrompt) + "\"}]},\"contents\":[{\"parts\":[{\"text\":\"" + jsonEscape(userPrompt) + "\"}]}],\"generationConfig\":{\"temperature\":0.1,\"maxOutputTokens\":6000}}";
+		HashMap<String, String> headers = new HashMap<String, String>();
+		headers.put("Content-Type", "application/json");
+		return sendHttpRequest("POST", endpoint, payload, headers);
+	}
+
+	public static String urlEncodePathSegment(String raw)
+	{
+		if(raw == null)
+			return "";
+		return raw.replace(" ", "%20");
+	}
+
+	public static String fetchPullRequestDiff(String repository, String prNumber, String pullRequestDiffUrl, String pullRequestBaseSha, String pullRequestHeadSha, String githubToken)
+	{
+		try
+		{
+			if(pullRequestDiffUrl != null && !pullRequestDiffUrl.isBlank())
+			{
+				HashMap<String, String> diffHeaders = new HashMap<String, String>();
+				diffHeaders.put("Accept", "application/vnd.github.v3.diff");
+				diffHeaders.put("Authorization", "Bearer " + githubToken);
+				HttpResult diffUrlResponse = sendHttpRequest("GET", pullRequestDiffUrl, null, diffHeaders);
+				debug("AI diff fetch via pullRequestDiffUrl status=" + diffUrlResponse.status);
+				if(diffUrlResponse.status >= 200 && diffUrlResponse.status <= 299 && diffUrlResponse.body != null && !diffUrlResponse.body.isBlank())
+					return diffUrlResponse.body;
+			}
+
+			if(pullRequestBaseSha != null && !pullRequestBaseSha.isBlank() && pullRequestHeadSha != null && !pullRequestHeadSha.isBlank())
+			{
+				HashMap<String, String> compareHeaders = new HashMap<String, String>();
+				compareHeaders.put("Accept", "application/vnd.github.v3.diff");
+				compareHeaders.put("Authorization", "Bearer " + githubToken);
+				String compareUrl = "https://api.github.com/repos/" + repository + "/compare/" + pullRequestBaseSha + "..." + pullRequestHeadSha;
+				HttpResult compareResponse = sendHttpRequest("GET", compareUrl, null, compareHeaders);
+				debug("AI diff fetch via compare API status=" + compareResponse.status);
+				if(compareResponse.status >= 200 && compareResponse.status <= 299 && compareResponse.body != null && !compareResponse.body.isBlank())
+					return compareResponse.body;
+			}
+
+			HashMap<String, String> headers = new HashMap<String, String>();
+			headers.put("Accept", "application/vnd.github.v3.diff");
+			headers.put("Authorization", "Bearer " + githubToken);
+			HttpResult response = sendHttpRequest("GET", "https://api.github.com/repos/" + repository + "/pulls/" + prNumber, null, headers);
+			debug("AI diff fetch via pulls API (diff accept) status=" + response.status);
+			if(response.status >= 200 && response.status <= 299)
+				return response.body;
+
+			String filesApiDiff = fetchPullRequestDiffFromFilesApi(repository, prNumber, githubToken);
+			if(filesApiDiff != null && !filesApiDiff.isBlank())
+				return filesApiDiff;
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to fetch PR diff: " + e.getMessage());
+		}
+		return "";
+	}
+
+	public static String fetchPullRequestDiffWithRetries(String repository, String prNumber, String pullRequestDiffUrl, String pullRequestBaseSha, String pullRequestHeadSha, String githubToken)
+	{
+		int maxAttempts = 4;
+		for(int attempt = 1; attempt <= maxAttempts; attempt++)
+		{
+			String diff = fetchPullRequestDiff(repository, prNumber, pullRequestDiffUrl, pullRequestBaseSha, pullRequestHeadSha, githubToken);
+			if(diff != null && !diff.isBlank())
+				return diff;
+			if(attempt < maxAttempts)
+			{
+				debug("AI diff fetch attempt " + attempt + " failed. Retrying...");
+				try
+				{
+					Thread.sleep(1500L * attempt);
+				}
+				catch(InterruptedException ie)
+				{
+					Thread.currentThread().interrupt();
+					break;
+				}
+			}
+		}
+		return "";
+	}
+
+	public static String fetchPullRequestDiffFromFilesApi(String repository, String prNumber, String githubToken)
+	{
+		try
+		{
+			HashMap<String, String> headers = new HashMap<String, String>();
+			headers.put("Accept", "application/vnd.github+json");
+			headers.put("Authorization", "Bearer " + githubToken);
+			String endpoint = "https://api.github.com/repos/" + repository + "/pulls/" + prNumber + "/files?per_page=100";
+			HttpResult response = sendHttpRequest("GET", endpoint, null, headers);
+			debug("AI diff fetch via pulls files API status=" + response.status);
+			if(response.status < 200 || response.status > 299 || response.body == null || response.body.isBlank())
+				return "";
+
+			String synthesizedDiff = synthesizeUnifiedDiffFromFilesResponse(response.body);
+			if(synthesizedDiff == null || synthesizedDiff.isBlank())
+				return "";
+			return synthesizedDiff;
+		}
+		catch(Exception e)
+		{
+			System.err.println("Unable to fetch PR files for diff synthesis: " + e.getMessage());
+		}
+		return "";
+	}
+
+	public static String synthesizeUnifiedDiffFromFilesResponse(String body)
+	{
+		if(body == null || body.isBlank())
+			return "";
+		Matcher entryMatcher = Pattern.compile("\\\"filename\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\\\"])*)\\\".*?\\\"status\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\\\"])*)\\\".*?(?:\\\"patch\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\\\"])*)\\\")?", Pattern.DOTALL).matcher(body);
+		StringBuilder sb = new StringBuilder();
+		int count = 0;
+		while(entryMatcher.find())
+		{
+			String fileName = jsonUnescape(defaultIfBlank(entryMatcher.group(1), ""));
+			String status = jsonUnescape(defaultIfBlank(entryMatcher.group(2), ""));
+			String patch = jsonUnescape(defaultIfBlank(entryMatcher.group(3), ""));
+			if(fileName.isBlank())
+				continue;
+			count++;
+			sb.append("diff --git a/").append(fileName).append(" b/").append(fileName).append("\n");
+			if("added".equalsIgnoreCase(status))
+				sb.append("new file mode 100644\n");
+			if("removed".equalsIgnoreCase(status))
+				sb.append("deleted file mode 100644\n");
+			sb.append("--- a/").append(fileName).append("\n");
+			sb.append("+++ b/").append(fileName).append("\n");
+			if(patch != null && !patch.isBlank())
+				sb.append(patch).append("\n");
+			else
+				sb.append("@@\n").append("[No textual patch available from GitHub files API]\n");
+		}
+		if(count == 0)
+			return "";
+		return sb.toString();
+	}
+
+	public static String buildAiPrompt(String repository, String prNumber, String pullRequestTitle, String pullRequestBody, String pullRequestUrl, String diff)
+	{
+		String normalizedDiff = defaultIfBlank(diff, "");
+		StringBuilder prompt = new StringBuilder();
+		prompt.append("Repository: ").append(defaultIfBlank(repository, "")).append("\\n");
+		prompt.append("PR Number: ").append(defaultIfBlank(prNumber, "")).append("\\n");
+		prompt.append("PR Title: ").append(defaultIfBlank(pullRequestTitle, "")).append("\\n");
+		prompt.append("PR URL: ").append(defaultIfBlank(pullRequestUrl, "")).append("\\n\\n");
+		prompt.append("PR Description:\\n").append(defaultIfBlank(pullRequestBody, "")).append("\\n\\n");
+		prompt.append("Review rule: PR title and description are optional context only. If they are missing, vague, or incomplete, ignore them and judge the change from the actual code diff. Do not block the review because the PR description is weak or blank.\\n");
+		prompt.append("If this diff is a version-only update (for example a version tag, release number, workflow image tag, or dependency version bump with no logic change), skip the review and return PASS with a short summary that says the change is a harmless version bump.\\n");
+		prompt.append("Only flag issues when there is a real logic, security, or regression risk.\\n");
+		prompt.append("Ignore formatting-only or metadata-only changes when no code behavior changed.\\n");
+		prompt.append("Diff:\\n").append(trimTo(normalizedDiff, 18000));
+		return prompt.toString();
+	}
+
+	public static String extractAiContent(String body, String provider)
+	{
+		if(body == null || body.isBlank())
+			return "";
+		if("claude".equals(provider))
+			return extractClaudeContent(body);
+		if("gemini".equals(provider))
+			return extractGeminiContent(body);
+		return extractOpenAiContent(body);
+	}
+
+	public static String extractOpenAiContent(String body)
+	{
+		if(body == null || body.isBlank())
+			return "";
+		String value = extractJsonStringField(body, "content");
+		if(value != null)
+			return normalizeEscapedMarkdownText(value);
+		return "";
+	}
+
+	public static String extractClaudeContent(String body)
+	{
+		if(body == null || body.isBlank())
+			return "";
+		String value = extractJsonStringField(body, "text");
+		if(value != null)
+			return normalizeEscapedMarkdownText(value);
+		return "";
+	}
+
+	public static String extractGeminiContent(String body)
+	{
+		if(body == null || body.isBlank())
+			return "";
+		String value = extractJsonStringField(body, "text");
+		if(value != null)
+			return normalizeEscapedMarkdownText(value);
+		return "";
+	}
+
+	public static String extractJsonStringField(String json, String fieldName)
+	{
+		if(json == null || json.isBlank() || fieldName == null || fieldName.isBlank())
+			return null;
+		String quotedField = "\"" + fieldName + "\"";
+		int searchFrom = 0;
+		while(true)
+		{
+			int keyIndex = json.indexOf(quotedField, searchFrom);
+			if(keyIndex < 0)
+				return null;
+			int colonIndex = json.indexOf(':', keyIndex + quotedField.length());
+			if(colonIndex < 0)
+				return null;
+
+			int valueStart = colonIndex + 1;
+			while(valueStart < json.length() && Character.isWhitespace(json.charAt(valueStart)))
+				valueStart++;
+
+			if(valueStart >= json.length())
+				return null;
+			if(json.charAt(valueStart) != '"')
+			{
+				searchFrom = keyIndex + quotedField.length();
+				continue;
+			}
+
+			StringBuilder escapedValue = new StringBuilder();
+			boolean escaping = false;
+			for(int i = valueStart + 1; i < json.length(); i++)
+			{
+				char c = json.charAt(i);
+				if(escaping)
+				{
+					escapedValue.append('\\').append(c);
+					escaping = false;
+					continue;
+				}
+				if(c == '\\')
+				{
+					escaping = true;
+					continue;
+				}
+				if(c == '"')
+				{
+					int nextNonSpace = i + 1;
+					while(nextNonSpace < json.length() && Character.isWhitespace(json.charAt(nextNonSpace)))
+						nextNonSpace++;
+					if(nextNonSpace >= json.length() || json.charAt(nextNonSpace) == ',' || json.charAt(nextNonSpace) == '}' || json.charAt(nextNonSpace) == ']')
+						return jsonUnescape(escapedValue.toString());
+					escapedValue.append(c);
+					continue;
+				}
+				escapedValue.append(c);
+			}
+
+			return null;
+		}
+	}
+
+	public static String extractLine(String content, String key)
+	{
+		if(content == null)
+			return "";
+		Matcher matcher = Pattern.compile("(?im)^\\s*" + Pattern.quote(key) + "\\s*[:=]\\s*(.+)$").matcher(content);
+		if(matcher.find())
+			return matcher.group(1).trim();
+		return "";
+	}
+
+	public static String formatAiReviewDetails(String content)
+	{
+		if(content == null || content.isBlank())
+			return "";
+		String source = normalizeEscapedMarkdownText(content).trim();
+		if(source.isBlank())
+			return "";
+		String details = extractStructuredIssueText(source);
+		if(details != null && !details.isBlank())
+			return details;
+		return source;
+	}
+
+	public static StructuredAiReviewResult parseStructuredAiReview(String content, String rawBody, String diffText)
+	{
+		String source = defaultIfBlank(content, defaultIfBlank(rawBody, ""));
+		source = normalizeEscapedMarkdownText(source);
+		if(source == null || source.isBlank())
+			return null;
+		if(source.length() >= 2 && source.startsWith("\"") && source.endsWith("\""))
+			source = jsonUnescape(source.substring(1, source.length() - 1));
+		String trimmed = source.trim();
+		String relaxed = trimmed.replace("\\\"", "\"");
+		StructuredAiReviewResult result = new StructuredAiReviewResult();
+		result.issues = new ArrayList<String>();
+		result.status = extractJsonStringField(trimmed, "status");
+		if(result.status == null || result.status.isBlank())
+			result.status = extractJsonStringField(trimmed, "result");
+		if(result.status == null || result.status.isBlank())
+			result.status = extractJsonStringField(trimmed, "verdict");
+		if(result.status == null || result.status.isBlank())
+			result.status = extractJsonStringField(relaxed, "status");
+		if(result.status == null || result.status.isBlank())
+			result.status = extractJsonStringField(relaxed, "result");
+		if(result.status == null || result.status.isBlank())
+			result.status = extractJsonStringField(relaxed, "verdict");
+		if(result.status == null || result.status.isBlank())
+		{
+			Matcher statusLine = Pattern.compile("(?is)(?:^|[\\{\\[,\\s])(?:\"?(?:status|result|verdict|decision|outcome)\"?\\s*[:=]\\s*)\"?(PASS|FAIL|PARTIAL|FAILED|APPROVED|REJECTED)\"?").matcher(trimmed);
+			if(statusLine.find())
+				result.status = statusLine.group(1).trim();
+			if(result.status == null || result.status.isBlank())
+			{
+				Matcher relaxedStatusLine = Pattern.compile("(?is)(?:^|[\\{\\[,\\s])(?:\"?(?:status|result|verdict|decision|outcome)\"?\\s*[:=]\\s*)\"?(PASS|FAIL|PARTIAL|FAILED|APPROVED|REJECTED)\"?").matcher(relaxed);
+				if(relaxedStatusLine.find())
+					result.status = relaxedStatusLine.group(1).trim();
+			}
+		}
+		if(result.status != null && !result.status.isBlank())
+		{
+			result.summary = extractJsonStringField(trimmed, "summary");
+			if(result.summary == null || result.summary.isBlank())
+				result.summary = extractJsonStringField(relaxed, "summary");
+			if(result.summary == null || result.summary.isBlank())
+			{
+				Matcher summaryLine = Pattern.compile("(?im)^\\s*summary\\s*[:=]\\s*(.+)$").matcher(trimmed);
+				if(summaryLine.find())
+					result.summary = summaryLine.group(1).trim();
+			}
+			result.reason = extractJsonStringField(trimmed, "reason");
+			if(result.reason == null || result.reason.isBlank())
+				result.reason = extractJsonStringField(relaxed, "reason");
+			if(result.reason == null || result.reason.isBlank())
+				result.reason = extractJsonStringField(trimmed, "message");
+			if(result.reason == null || result.reason.isBlank())
+				result.reason = extractJsonStringField(relaxed, "message");
+			result.details = extractStructuredIssueText(trimmed);
+			if(result.details == null || result.details.isBlank())
+				result.details = extractStructuredIssueText(relaxed);
+			if(result.details == null || result.details.isBlank())
+				result.details = formatAiReviewDetails(trimmed);
+			result.issues = extractIssueCommentsFromAiContent(trimmed, trimmed, diffText);
+			if(result.issues == null || result.issues.isEmpty())
+				result.issues = extractIssueCommentsFromAiContent(relaxed, relaxed, diffText);
+			debug("Parsed AI response issues count=" + result.issues.size());
+			return result;
+		}
+		Matcher lineStatus = Pattern.compile("(?im)^\\s*(?:status|result|verdict|decision|outcome)\\s*[:=]\\s*(PASS|FAIL|PARTIAL|FAILED|APPROVED|REJECTED)\\b").matcher(trimmed);
+		if(lineStatus.find())
+		{
+			result.status = lineStatus.group(1).trim().toUpperCase();
+			result.summary = extractLine(trimmed, "SUMMARY");
+			result.reason = extractLine(trimmed, "REASON");
+			result.details = formatAiReviewDetails(trimmed);
+			result.issues = extractIssueCommentsFromAiContent(trimmed, trimmed, diffText);
+			debug("Parsed AI response issues count=" + result.issues.size());
+			return result;
+		}
+		return null;
+	}
+
+	public static String extractStructuredIssueText(String json)
+	{
+		if(json == null || json.isBlank())
+			return "";
+		ArrayList<String> issueTexts = new ArrayList<String>();
+		Pattern itemPattern = Pattern.compile("(?is)\\{\\s*\"file\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*,\\s*\"line\"\\s*:\\s*(?:\"((?:\\\\.|[^\"\\\\])*)\"|(-?\\d+))\\s*,\\s*\"issue\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*,\\s*(?:\"diff_line\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*,\\s*)?\"fix\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
+		Matcher itemMatcher = itemPattern.matcher(json);
+		while(itemMatcher.find())
+		{
+			String file = jsonUnescape(itemMatcher.group(1));
+			String line = defaultIfBlank(itemMatcher.group(2), itemMatcher.group(3));
+			line = jsonUnescape(defaultIfBlank(line, "n/a"));
+			String issue = jsonUnescape(itemMatcher.group(4));
+			String diffLine = jsonUnescape(defaultIfBlank(itemMatcher.group(5), ""));
+			String fix = jsonUnescape(itemMatcher.group(6));
+			String text = "FILE: " + defaultIfBlank(file, "n/a") + " | LINE: " + defaultIfBlank(line, "n/a") + " | ISSUE: " + defaultIfBlank(issue, "No issue provided.");
+			if(diffLine != null && !diffLine.isBlank())
+				text = text + " | DIFF: " + diffLine;
+			text = text + " | FIX: " + defaultIfBlank(fix, "No fix provided.");
+			issueTexts.add(text);
+		}
+		return String.join("\n", issueTexts);
+	}
+
+	public static ArrayList<String> extractIssueCommentsFromAiContent(String content, String rawBody, String diffText)
+	{
+		String[] candidates = new String[] {
+			defaultIfBlank(content, ""),
+			defaultIfBlank(rawBody, ""),
+			normalizeEscapedMarkdownText(defaultIfBlank(content, defaultIfBlank(rawBody, ""))),
+			defaultIfBlank(content, defaultIfBlank(rawBody, "")).replace("\\\"", "\""),
+			defaultIfBlank(content, defaultIfBlank(rawBody, "")).replace("\\n", "\n").replace("\\\"", "\"")
+		};
+		for(String rawCandidate : candidates)
+		{
+			String source = rawCandidate;
+			if(source == null || source.isBlank())
+				continue;
+			ArrayList<String> parsed = extractIssueCommentsFromAiContentAttempt(source, diffText);
+			if(parsed != null && !parsed.isEmpty())
+				return parsed;
+		}
+		return new ArrayList<String>();
+	}
+
+	public static ArrayList<String> extractIssueCommentsFromAiContentAttempt(String source, String diffText)
+	{
+		if(source == null || source.isBlank())
+			return new ArrayList<String>();
+		ArrayList<String> comments = new ArrayList<String>();
+		Pattern issuesArrayPattern = Pattern.compile("(?is)\"issues\"\\s*:\\s*\\[(.*?)]");
+		Matcher issuesArrayMatcher = issuesArrayPattern.matcher(source);
+		while(issuesArrayMatcher.find())
+		{
+			String issuesBlock = issuesArrayMatcher.group(1);
+			Pattern issueObjectPattern = Pattern.compile("(?is)\\{.*?\\}");
+			Matcher issueObjectMatcher = issueObjectPattern.matcher(issuesBlock);
+			while(issueObjectMatcher.find())
+			{
+				String object = issueObjectMatcher.group();
+				String file = extractJsonStringField(object, "file");
+				String line = extractJsonStringField(object, "line");
+				String issue = extractJsonStringField(object, "issue");
+				String fix = extractJsonStringField(object, "fix");
+				String diffLine = extractJsonStringField(object, "diff_line");
+				if(diffLine == null || diffLine.isBlank())
+					diffLine = extractJsonStringField(object, "diff");
+				if(diffLine == null || diffLine.isBlank())
+					diffLine = extractJsonStringField(object, "recommendation");
+				if(file == null && issue == null && fix == null)
+					continue;
+				if(file == null || file.isBlank())
+					file = "n/a";
+				if(line == null || line.isBlank())
+					line = "n/a";
+				if(issue == null || issue.isBlank())
+					issue = "Issue details were not provided.";
+				if(fix == null || fix.isBlank())
+					fix = "Review and update this code path to remove the issue.";
+				if(diffText != null && !diffText.isBlank() && diffLine != null && !diffLine.isBlank() && !issueAnchorsToCurrentDiff(diffText, file, diffLine))
+					continue;
+				String diffSnippet = findDiffSnippetForIssue(diffText, file, line, diffLine);
+				if((diffSnippet == null || diffSnippet.isBlank()) && diffLine != null && !diffLine.isBlank())
+					diffSnippet = "+ " + diffLine;
+				comments.add(buildAiIssueCommentMarkdown(file, line, issue, fix, diffSnippet));
+			}
+		}
+		if(!comments.isEmpty())
+			return comments;
+		Pattern legacyPattern = Pattern.compile("(?is)\\{\\s*\"file\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*,\\s*\"line\"\\s*:\\s*(?:\"((?:\\\\.|[^\"\\\\])*)\"|(-?\\d+))\\s*,\\s*\"issue\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*,\\s*(?:\"diff_line\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*,\\s*)?\"fix\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
+		Matcher legacyMatcher = legacyPattern.matcher(source);
+		while(legacyMatcher.find())
+		{
+			String file = jsonUnescape(defaultIfBlank(legacyMatcher.group(1), "n/a"));
+			String line = defaultIfBlank(legacyMatcher.group(2), legacyMatcher.group(3));
+			line = jsonUnescape(defaultIfBlank(line, "n/a"));
+			String issue = jsonUnescape(defaultIfBlank(legacyMatcher.group(4), "No issue provided."));
+			String diffLine = jsonUnescape(defaultIfBlank(legacyMatcher.group(5), ""));
+			String fix = jsonUnescape(defaultIfBlank(legacyMatcher.group(6), "No fix provided."));
+			String diffSnippet = findDiffSnippetForIssue(diffText, file, line, diffLine);
+			if((diffSnippet == null || diffSnippet.isBlank()) && diffLine != null && !diffLine.isBlank())
+				diffSnippet = "+ " + diffLine;
+			comments.add(buildAiIssueCommentMarkdown(file, line, issue, fix, diffSnippet));
+		}
+		return comments;
+	}
+
+	public static boolean issueAnchorsToCurrentDiff(String diffText, String issueFileRaw, String diffLineRaw)
+	{
+		if(diffText == null || diffText.isBlank() || issueFileRaw == null || issueFileRaw.isBlank() || diffLineRaw == null || diffLineRaw.isBlank())
+			return true;
+
+		String targetFile = normalizePathForDiffMatch(issueFileRaw);
+		String[] lines = normalizeEscapedMarkdownText(diffText).split("\n");
+		String normalizedNeedle = jsonUnescape(diffLineRaw).trim();
+		String compactNeedle = normalizedNeedle.replaceAll("\\s+", " ").trim();
+		if(compactNeedle.isBlank())
+			return true;
+
+		boolean inTargetFile = false;
+		for(String line : lines)
+		{
+			if(line.startsWith("diff --git "))
+			{
+				inTargetFile = diffHeaderMatchesFile(line, targetFile);
+				continue;
+			}
+			if(!inTargetFile)
+				continue;
+			String candidate = line.trim();
+			if(candidate.startsWith("+") || candidate.startsWith("-"))
+			{
+				String stripped = candidate.substring(1).trim();
+				if(stripped.contains(normalizedNeedle) || stripped.contains(compactNeedle))
+					return true;
+				String compactStripped = stripped.replaceAll("\\s+", " ").trim();
+				if(compactStripped.contains(compactNeedle))
+					return true;
+			}
+		}
+		return false;
+	}
+
+	public static String buildAiIssueCommentMarkdown(String file, String line, String issue, String fix, String diffSnippet)
+	{
+		String safeFile = defaultIfBlank(file, "n/a");
+		String safeLine = defaultIfBlank(line, "n/a");
+		String safeIssue = defaultIfBlank(issue, "No issue provided.");
+		String safeFix = defaultIfBlank(fix, "No fix provided.");
+		String diffBlock = "";
+		if(diffSnippet != null && !diffSnippet.isBlank())
+		{
+			diffBlock = "<details>\n"
+				+ "<summary><strong>View comparison</strong></summary>\n\n"
+				+ "```diff\n"
+				+ trimTo(diffSnippet, 1500)
+				+ "\n```\n"
+				+ "</details>\n";
+		}
+		return ISSUE_COMMENT_TEMPLATE
+			.replace("{{file}}", safeFile)
+			.replace("{{line}}", safeLine)
+			.replace("{{issue}}", safeIssue)
+			.replace("{{fix}}", safeFix)
+			.replace("{{diff_block}}", diffBlock);
+	}
+
+	public static String findDiffSnippetForIssue(String diffText, String issueFileRaw, String issueLineRaw, String diffLineOverride)
+	{
+		if(diffText == null || diffText.isBlank() || issueFileRaw == null || issueFileRaw.isBlank())
+			return "";
+
+		String targetFile = normalizePathForDiffMatch(issueFileRaw);
+		String[] lines = normalizeEscapedMarkdownText(diffText).split("\n");
+		boolean inTargetFile = false;
+		int newLinePointer = -1;
+		int issueLine = -1;
+		try
+		{
+			String issueLineText = defaultIfBlank(issueLineRaw, "").trim();
+			if(!issueLineText.isBlank() && !"n/a".equalsIgnoreCase(issueLineText))
+				issueLine = Integer.parseInt(issueLineText);
+		}
+		catch(Exception e)
+		{
+			issueLine = -1;
+		}
+
+		String fallbackFileHunk = "";
+		for(int i = 0; i < lines.length; i++)
+		{
+			String line = lines[i];
+			if(line.startsWith("diff --git "))
+			{
+				inTargetFile = diffHeaderMatchesFile(line, targetFile);
+				newLinePointer = -1;
+				if(inTargetFile)
+				{
+					StringBuilder hunk = new StringBuilder();
+					for(int j = i; j < lines.length && !lines[j].startsWith("diff --git "); j++)
+					{
+						if(j == i)
+							continue;
+						if(lines[j].startsWith("@@ "))
+							break;
+						if(!lines[j].startsWith("--- ") && !lines[j].startsWith("+++ "))
+							hunk.append(lines[j]).append("\n");
+					}
+					if(!hunk.toString().trim().isBlank())
+						fallbackFileHunk = hunk.toString().trim();
+				}
+				continue;
+			}
+			if(!inTargetFile)
+				continue;
+			if(line.startsWith("@@ "))
+			{
+				Matcher hunkMatcher = Pattern.compile("^@@\\s+-\\d+(?:,\\d+)?\\s+\\+(\\d+)(?:,\\d+)?\\s+@@").matcher(line);
+				if(hunkMatcher.find())
+				{
+					try
+					{
+						newLinePointer = Integer.parseInt(hunkMatcher.group(1)) - 1;
+					}
+					catch(Exception e)
+					{
+						newLinePointer = -1;
+					}
+				}
+				continue;
+			}
+			if(newLinePointer < 0)
+				continue;
+			boolean isFileHeader = line.startsWith("+++") || line.startsWith("---");
+			if(isFileHeader)
+				continue;
+			char prefix = line.isEmpty() ? ' ' : line.charAt(0);
+			if(prefix == '+')
+				newLinePointer++;
+			else if(prefix == ' ')
+				newLinePointer++;
+			else if(prefix == '-')
+			{
+				// removed lines do not advance the new-file line pointer, but keep the hunk context
+			}
+			else
+				continue;
+
+			if(issueLine > 0 && newLinePointer == issueLine)
+			{
+				String candidate = extractCurrentHunk(lines, i);
+				if(!candidate.isBlank())
+					return candidate;
+			}
+		}
+
+		if(diffLineOverride != null && !diffLineOverride.isBlank())
+		{
+			String needle = diffLineOverride.trim();
+			for(int i = 0; i < lines.length; i++)
+			{
+				String line = lines[i];
+				if(line.startsWith("diff --git "))
+				{
+					inTargetFile = diffHeaderMatchesFile(line, targetFile);
+					newLinePointer = -1;
+					continue;
+				}
+				if(!inTargetFile)
+					continue;
+				String normalizedLine = line.trim();
+				if(normalizedLine.startsWith("+") && normalizedLine.length() > 1 && normalizedLine.substring(1).trim().contains(needle))
+				{
+					String candidate = extractCurrentHunk(lines, i);
+					if(!candidate.isBlank())
+						return candidate;
+				}
+			}
+		}
+
+		if(!fallbackFileHunk.isBlank())
+			return fallbackFileHunk;
+		return "";
+	}
+
+	public static String extractCurrentHunk(String[] lines, int lineIndex)
+	{
+		if(lines == null || lineIndex < 0 || lineIndex >= lines.length)
+			return "";
+
+		int start = lineIndex;
+		while(start > 0)
+		{
+			if(lines[start].startsWith("@@ "))
+				break;
+			start--;
+		}
+		if(!lines[start].startsWith("@@ "))
+		{
+			start = Math.max(0, lineIndex - 12);
+		}
+
+		int end = lineIndex;
+		while(end < lines.length - 1)
+		{
+			if(lines[end].startsWith("diff --git "))
+				break;
+			if(lines[end].startsWith("@@ ") && end > lineIndex)
+				break;
+			end++;
+		}
+		if(end > lineIndex && lines[end].startsWith("@@ "))
+		{
+			end = end - 1;
+		}
+
+		StringBuilder snippet = new StringBuilder();
+		for(int j = start; j <= end; j++)
+		{
+			if(j < 0 || j >= lines.length)
+				continue;
+			if(lines[j].startsWith("diff --git "))
+				continue;
+			snippet.append(lines[j]).append("\n");
+		}
+		String candidate = snippet.toString().trim();
+		if(candidate.isBlank())
+			return "";
+		return candidate;
+	}
+
+	public static boolean diffHeaderMatchesFile(String diffHeader, String normalizedTargetFile)
+	{
+		if(diffHeader == null || diffHeader.isBlank() || normalizedTargetFile == null || normalizedTargetFile.isBlank())
+			return false;
+		Matcher matcher = Pattern.compile("^diff --git a/(.+) b/(.+)$").matcher(diffHeader.trim());
+		if(!matcher.find())
+			return false;
+		String rightPath = normalizePathForDiffMatch(defaultIfBlank(matcher.group(2), ""));
+		if(rightPath.equalsIgnoreCase(normalizedTargetFile))
+			return true;
+		return rightPath.endsWith("/" + normalizedTargetFile);
+	}
+
+	public static String normalizePathForDiffMatch(String rawPath)
+	{
+		String value = defaultIfBlank(rawPath, "").trim().replace('\\', '/');
+		if(value.startsWith("./"))
+			value = value.substring(2);
+		if(value.startsWith("a/"))
+			value = value.substring(2);
+		if(value.startsWith("b/"))
+			value = value.substring(2);
+		return value;
+	}
+
+	public static String normalizeEscapedMarkdownText(String raw)
+	{
+		if(raw == null)
+			return "";
+		String value = raw.replace("\\r\\n", "\n").replace("\\r", "\n").replace("\\n", "\n");
+		value = value.replace("\r\n", "\n").replace("\r", "\n");
+		return value;
+	}
+
+	public static String jsonUnescape(String raw)
+	{
+		if(raw == null)
+			return "";
+		return raw.replace("\\\\n", "\\n").replace("\\\\r", "").replace("\\\\\"", "\"").replace("\\\\\\", "\\");
+	}
+
+	public static String trimTo(String value, int maxLen)
+	{
+		if(value == null)
+			return "";
+		if(value.length() <= maxLen)
+			return value;
+		return value.substring(0, maxLen) + "\n\n[truncated]";
+	}
+
+	public static String detectAiProvider(String token, String apiUrl)
+	{
+		String url = defaultIfBlank(apiUrl, "").toLowerCase();
+		if(url.contains("anthropic"))
+			return "claude";
+		if(url.contains("generativelanguage.googleapis.com") || url.contains("gemini"))
+			return "gemini";
+		if(url.contains("openai"))
+			return "openai";
+
+		String normalizedToken = defaultIfBlank(token, "").trim();
+		if(normalizedToken.startsWith("sk-ant-"))
+			return "claude";
+		if(normalizedToken.startsWith("AIza"))
+			return "gemini";
+		if(normalizedToken.startsWith("sk-"))
+			return "openai";
+
+		// Default to OpenAI-compatible for unknown token patterns.
+		return "openai";
+	}
+
+	public static String resolveModelForProvider(String provider, String configuredModel)
+	{
+		if(configuredModel != null && !configuredModel.isBlank())
+			return configuredModel;
+		if("claude".equals(provider))
+			return "claude-sonnet-5";
+		if("gemini".equals(provider))
+			return "gemini-2.5-pro";
+		return "gpt-4.1-mini";
+	}
+
+	public static boolean anthropicSupportsTemperature(String model)
+	{
+		if(model == null || model.isBlank())
+			return true;
+		String normalized = model.trim().toLowerCase(Locale.ROOT);
+		return !(normalized.contains("claude-sonnet-4") || normalized.contains("claude-opus-4") || normalized.contains("claude-sonnet-5") || normalized.contains("claude-opus-5"));
+	}
+
+	public static String resolveApiUrlForProvider(String provider, String configuredApiUrl)
+	{
+		if(configuredApiUrl != null && !configuredApiUrl.isBlank())
+			return configuredApiUrl;
+		if("claude".equals(provider))
+			return "https://api.anthropic.com/v1/messages";
+		if("gemini".equals(provider))
+			return "https://generativelanguage.googleapis.com/v1beta/models";
+		return "https://api.openai.com/v1/chat/completions";
+	}
+
+	public static String buildAiFailureMessage(String prNumber, String pullRequestUrl, String summary, String details)
+	{
+		String trimmedDetails = defaultIfBlank(details, "No details provided.");
+		StringBuilder msg = new StringBuilder();
+		msg.append("### AI Review Report\n\n");
+		msg.append("PR #").append(defaultIfBlank(prNumber, "")).append(" ");
+		if(pullRequestUrl != null && !pullRequestUrl.isBlank())
+			msg.append("(").append(pullRequestUrl).append(")");
+		msg.append("\n\n");
+		msg.append("*Status:* FAIL\n\n");
+		msg.append("*Summary:* ").append(defaultIfBlank(summary, "AI review report")).append("\n\n");
+		msg.append(trimTo(trimmedDetails, 6000)).append("\n\n");
+		msg.append("Fix the blocking issues and push new changes to rerun AI review.");
+		return msg.toString();
+	}
+
+	public static String buildCliqAiFailureMessage(String projectName, String pullRequestUrl, String summary, String details, int issueCount, int filesReviewed)
+	{
+		StringBuilder msg = new StringBuilder();
+		msg.append("### ❌ AI Review Failed\n\n");
+		msg.append("*Project:* ").append(defaultIfBlank(projectName, "Unknown project")).append("\n");
+		if(pullRequestUrl != null && !pullRequestUrl.isBlank())
+			msg.append("*MR:* [").append(pullRequestUrl).append("](").append(pullRequestUrl).append(")\n");
+		else
+			msg.append("*MR:* n/a\n");
+		String effectiveSummary = defaultIfBlank(summary, "AI review marked this merge request as risky.");
+		msg.append("*Summary:* ").append(effectiveSummary).append("\n");
+		msg.append("*Issue count:* ").append(issueCount).append("\n");
+		msg.append("*Files reviewed:* ").append(filesReviewed).append("\n\n");
+		msg.append("See full details in the MR comment.");
+		return msg.toString();
+	}
+
+	public static String buildCliqAiSuccessMessage(String projectName, String pullRequestUrl, String summary, String details, int issueCount, int filesReviewed)
+	{
+		StringBuilder msg = new StringBuilder();
+		msg.append("### ✅ AI Review Passed\n\n");
+		msg.append("*Project:* ").append(defaultIfBlank(projectName, "Unknown project")).append("\n");
+		if(pullRequestUrl != null && !pullRequestUrl.isBlank())
+			msg.append("*MR:* [").append(pullRequestUrl).append("](").append(pullRequestUrl).append(")\n");
+		else
+			msg.append("*MR:* n/a\n");
+		String effectiveSummary = defaultIfBlank(summary, "AI review checks passed.");
+		msg.append("*Summary:* ").append(effectiveSummary).append("\n");
+		msg.append("*Issue count:* ").append(issueCount).append("\n");
+		msg.append("*Files reviewed:* ").append(filesReviewed).append("\n\n");
+		msg.append("See full details in the MR comment.");
+		return msg.toString();
+	}
+
+	public static int countUniqueFilesInIssueComments(ArrayList<String> issueComments)
+	{
+		if(issueComments == null || issueComments.isEmpty())
+			return 0;
+		ArrayList<String> uniqueFiles = new ArrayList<String>();
+		for(String issueComment : issueComments)
+		{
+			if(issueComment == null)
+				continue;
+			Matcher matcher = Pattern.compile("\\*\\*File:\\*\\*\\s*([^\\n]+)", Pattern.CASE_INSENSITIVE).matcher(issueComment);
+			if(matcher.find())
+			{
+				String fileName = matcher.group(1).trim();
+				if(!fileName.isBlank() && !uniqueFiles.contains(fileName))
+					uniqueFiles.add(fileName);
+			}
+		}
+		return uniqueFiles.size();
+	}
+
+	public static String buildGeneralErrorComment(String errorMessage)
+	{
+		String message = defaultIfBlank(errorMessage, "Unknown error");
+		return "### GitHub Informer Error\n\n"
+			+ "Workflow failed while processing this PR.\n\n"
+			+ "**Error:** " + message + "\n\n"
+			+ "Review the workflow logs and fix the configuration or payload issue.";
+	}
+
+	public static boolean postPullRequestComment(String repository, String prNumber, String githubToken, String commentBody)
+	{
+		try
+		{
+			String payload = "{\"body\":\"" + jsonEscape(commentBody) + "\"}";
+			HashMap<String, String> headers = new HashMap<String, String>();
+			headers.put("Accept", "application/vnd.github+json");
+			headers.put("Authorization", "Bearer " + githubToken);
+			headers.put("Content-Type", "application/json");
+			String endpoint = "https://api.github.com/repos/" + repository + "/issues/" + prNumber + "/comments";
+			int maxAttempts = 3;
+			for(int attempt = 1; attempt <= maxAttempts; attempt++)
+			{
+				HttpResult response = sendHttpRequest("POST", endpoint, payload, headers);
+				if(response.status >= 200 && response.status <= 299)
+					return true;
+				String bodyPreview = preview(response.body);
+				boolean retryable = response.status == 429
+					|| (response.status == 403 && defaultIfBlank(response.body, "").toLowerCase().contains("secondary rate"))
+					|| (response.status == 422 && defaultIfBlank(response.body, "").toLowerCase().contains("abuse"));
+				if(!retryable || attempt == maxAttempts)
+				{
+					System.err.println("Failed to post AI review PR comment: status=" + response.status + ", body=" + bodyPreview);
+					return false;
+				}
+				try
+				{
+					Thread.sleep(800L * attempt);
+				}
+				catch(InterruptedException ie)
+				{
+					Thread.currentThread().interrupt();
+					System.err.println("Failed to post AI review PR comment: interrupted during retry wait.");
+					return false;
+				}
+			}
+		}
+		catch(Exception e)
+		{
+			System.err.println("Failed to post AI review PR comment: " + e.getMessage());
+			return false;
+		}
+		return false;
+	}
+
+	public static void postAiFailureToCliqThread(String cliqEndpoint, String cliqThreadId, String imageUrl, String failureMessage)
+	{
+		if(cliqEndpoint == null || cliqEndpoint.isBlank())
+			return;
+		try
+		{
+			String message = failureMessage;
+			boolean useCliqBotAuth = isCliqBotAuthEndpoint(cliqEndpoint);
+			if(cliqThreadId != null && !cliqThreadId.isBlank())
+			{
+				ArrayList<String> candidates = buildReplyToCandidates(cliqThreadId);
+				for(String candidate : candidates)
+				{
+					HttpResult result = postJson(cliqEndpoint, buildCliqCardPayload(message, imageUrl, candidate, useCliqBotAuth));
+					if(result.status >= 200 && result.status <= 299)
+						return;
+				}
+			}
+			postJson(cliqEndpoint, buildCliqCardPayload(message, imageUrl, null, useCliqBotAuth));
+		}
+		catch(Exception e)
+		{
+			System.err.println("Failed to post AI review failure in Cliq: " + e.getMessage());
+		}
+	}
+
+	public static void postAiSuccessToCliqThread(String cliqEndpoint, String cliqThreadId, String imageUrl, String successMessage)
+	{
+		if(cliqEndpoint == null || cliqEndpoint.isBlank())
+			return;
+		try
+		{
+			String message = successMessage;
+			boolean useCliqBotAuth = isCliqBotAuthEndpoint(cliqEndpoint);
+			if(cliqThreadId != null && !cliqThreadId.isBlank())
+			{
+				ArrayList<String> candidates = buildReplyToCandidates(cliqThreadId);
+				for(String candidate : candidates)
+				{
+					HttpResult result = postJson(cliqEndpoint, buildCliqCardPayload(message, imageUrl, candidate, useCliqBotAuth));
+					if(result.status >= 200 && result.status <= 299)
+						return;
+				}
+			}
+			postJson(cliqEndpoint, buildCliqCardPayload(message, imageUrl, null, useCliqBotAuth));
+		}
+		catch(Exception e)
+		{
+			System.err.println("Failed to post AI review success in Cliq: " + e.getMessage());
+		}
+	}
+
+	public static void setAiReviewCheckRun(String repository, String headSha, String githubToken, String checkName, String conclusionRaw, String summary, String details)
+	{
+		try
+		{
+			String conclusion = defaultIfBlank(conclusionRaw, "success").trim().toLowerCase();
+			if(!("success".equals(conclusion) || "failure".equals(conclusion) || "neutral".equals(conclusion) || "cancelled".equals(conclusion) || "timed_out".equals(conclusion) || "skipped".equals(conclusion) || "action_required".equals(conclusion) || "stale".equals(conclusion)))
+				conclusion = "success";
+			String payload = "{"
+				+ "\"name\":\"" + jsonEscape(checkName) + "\"," 
+				+ "\"head_sha\":\"" + jsonEscape(headSha) + "\"," 
+				+ "\"status\":\"completed\"," 
+				+ "\"conclusion\":\"" + conclusion + "\"," 
+				+ "\"output\":{\"title\":\"" + jsonEscape(checkName) + "\",\"summary\":\"" + jsonEscape(defaultIfBlank(summary, "AI review completed")) + "\",\"text\":\"" + jsonEscape(trimTo(defaultIfBlank(details, ""), 5000)) + "\"}"
+				+ "}";
+
+			HashMap<String, String> headers = new HashMap<String, String>();
+			headers.put("Accept", "application/vnd.github+json");
+			headers.put("Authorization", "Bearer " + githubToken);
+			headers.put("Content-Type", "application/json");
+			HttpResult response = sendHttpRequest("POST", "https://api.github.com/repos/" + repository + "/check-runs", payload, headers);
+			if(response.status < 200 || response.status > 299)
+				System.err.println("Failed to set AI review check run: status=" + response.status + ", body=" + preview(response.body));
+		}
+		catch(Exception e)
+		{
+			System.err.println("Failed to set AI review check run: " + e.getMessage());
+		}
+	}
+
+	public static void setAiReviewCommitStatus(String repository, String headSha, String githubToken, String contextName, String conclusionRaw, String summary)
+	{
+		try
+		{
+			String normalizedConclusion = defaultIfBlank(conclusionRaw, "failure").trim().toLowerCase();
+			String state = "failure";
+			if("success".equals(normalizedConclusion) || "neutral".equals(normalizedConclusion) || "skipped".equals(normalizedConclusion))
+				state = "success";
+			else if("pending".equals(normalizedConclusion))
+				state = "pending";
+
+			String description = defaultIfBlank(summary, "AI review completed");
+			description = trimTo(description, 130).replace("\n", " ").replace("\r", " ");
+			String payload = "{"
+				+ "\"state\":\"" + jsonEscape(state) + "\"," 
+				+ "\"context\":\"" + jsonEscape(defaultIfBlank(contextName, "AI Review Gate")) + "\"," 
+				+ "\"description\":\"" + jsonEscape(description) + "\""
+				+ "}";
+
+			HashMap<String, String> headers = new HashMap<String, String>();
+			headers.put("Accept", "application/vnd.github+json");
+			headers.put("Authorization", "Bearer " + githubToken);
+			headers.put("Content-Type", "application/json");
+			HttpResult response = sendHttpRequest("POST", "https://api.github.com/repos/" + repository + "/statuses/" + headSha, payload, headers);
+			if(response.status < 200 || response.status > 299)
+				System.err.println("Failed to set AI review commit status: status=" + response.status + ", body=" + preview(response.body));
+		}
+		catch(Exception e)
+		{
+			System.err.println("Failed to set AI review commit status: " + e.getMessage());
+		}
+	}
+
+	public static boolean isTrue(String value)
+	{
+		if(value == null)
+			return false;
+		String normalized = value.trim().toLowerCase();
+		return "true".equals(normalized) || "1".equals(normalized) || "yes".equals(normalized);
+	}
+
+	public static String defaultIfBlank(String value, String fallback)
+	{
+		if(value == null || value.isBlank())
+			return fallback;
+		return value;
+	}
+
+	public static void debug(String message)
+	{
+		System.out.println("[CliqInformerDebug] " + message);
+	}
+
+	public static String preview(String value)
+	{
+		if(value == null)
+			return "<null>";
+		String sanitized = value.replace("\n", " ").replace("\r", " ").trim();
+		if(sanitized.length() > 280)
+			return sanitized.substring(0, 280) + "...";
+		return sanitized;
+	}
 }
